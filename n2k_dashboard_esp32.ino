@@ -318,14 +318,13 @@ void tftPageWind() {
 
 }
 
-// Long range plot is a 12nm radius
-// Short range plot is a 4nm radius
-// Vectors show projected position in 10min
+// AIS plot at various ranges defined by page ID.
+// Vectors show projected position in 5min
 void tftPageAis(Page pg) {
     const double radius = 60.0;
     double range = pg == PAGE_AIS_12NM ? 12.0 : pg == PAGE_AIS_4NM ? 4.0 : 1.0;
     double range_scale = radius / range;
-    double vector_scale = range_scale / 6.0;;
+    double vector_scale = range_scale / 12.0;;
     int x0 = 240 / 2;
     int y0 = 135 / 2;
 
@@ -346,37 +345,44 @@ void tftPageAis(Page pg) {
 
     // Local COG vector
     tft.drawLine(x0, y0, x0 + round(localCog.getX() * vector_scale),
-                 y0 + round(localCog.getY() * vector_scale), ST77XX_YELLOW);
+                 y0 - round(localCog.getY() * vector_scale), ST77XX_YELLOW);
 
-    // MA! TODO Skip rest until we have local position
+    // Skip rest until we have local position
+    if (bPosValid) {
+        for (auto t : targets) {
 
-    for (auto t : targets) {
+            if (*t->getTimestamp() == 0) {
+                // Static data only (no position) so skip
+                continue;
+            }
+            const N2kVector& p = t->getRelDistance();
+            if (p.getMagnitude() > range) {
+                continue;
+            }
 
-        if (*t->getTimestamp() == 0) {
-            continue;
+            const N2kVector& v = t->getVelocity();
+            tft.fillCircle(x0 + round(p.getX() * range_scale),
+                           y0 - round(p.getY() * range_scale),
+                           3, ST77XX_RED);
+            tft.drawLine(x0 + round(p.getX() * range_scale),
+                         y0 - round(p.getY() * range_scale),
+                         x0 + round(p.getX() * range_scale + v.getX() * vector_scale),
+                         y0 - round(p.getY() * range_scale + v.getY() * vector_scale),
+                         ST77XX_YELLOW);
+            #if 0
+            tft.drawLine(x0 + round(p.getX() * range_scale),
+                         y0 + round(p.getY() * range_scale),
+                         x0 + round(p.getX() * range_scale) + 1,
+                         y0 + round(p.getY() * range_scale),
+                         ST77XX_RED);
+            tft.drawLine(x0 + round(p.getX() * range_scale),
+                         y0 + round(p.getY() * range_scale) + 1,
+                         x0 + round(p.getX() * range_scale) + 1,
+                         y0 + round(p.getY() * range_scale) + 1,
+                         ST77XX_RED);
+            #endif
+
         }
-        const N2kVector& p = t->getRelDistance();
-        if (p.getMagnitude() > range) {
-            continue;
-        }
-
-        // MA! TODO Check long/lat. Positions seem inverted somewhere. Targets are on land.
-        const N2kVector& v = t->getVelocity();
-        tft.drawLine(x0 + round(p.getX() * range_scale),
-                     y0 + round(p.getY() * range_scale),
-                     x0 + round(p.getX() * range_scale + v.getX() * vector_scale),
-                     y0 + round(p.getY() * range_scale + v.getY() * vector_scale),
-                     ST77XX_YELLOW);
-        tft.drawLine(x0 + round(p.getX() * range_scale),
-                     y0 + round(p.getY() * range_scale),
-                     x0 + round(p.getX() * range_scale) + 1,
-                     y0 + round(p.getY() * range_scale),
-                     ST77XX_RED);
-        tft.drawLine(x0 + round(p.getX() * range_scale),
-                     y0 + round(p.getY() * range_scale) + 1,
-                     x0 + round(p.getX() * range_scale) + 1,
-                     y0 + round(p.getY() * range_scale) + 1,
-                     ST77XX_RED);
     }
 
 }
