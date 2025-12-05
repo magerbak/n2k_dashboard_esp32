@@ -9,15 +9,11 @@
   internal CAN controller (external transceiver required).
 
  **************************************************************************/
-#define USE_DISPLAY 1
-
 #include <limits>
 #include <list>
-#ifdef USE_DISPLAY  
 #include <Adafruit_GFX.h>    // Core graphics library
 #include <Adafruit_ST7789.h> // Hardware-specific library for ST7789
 #include <SPI.h>
-#endif
 
 #include "N2kMsg.h"
 #include "NMEA2000.h"
@@ -37,28 +33,29 @@
 tNMEA2000 &NMEA2000=*(new tNMEA2000_esp32());
 
 // Use dedicated hardware SPI pins
-#ifdef USE_DISPLAY  
 Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
-#endif
 
 // Display page
 enum Page {
     PAGE_WIND,
     PAGE_POSITION,
-    PAGE_AIS_LONG,
-    PAGE_AIS_SHORT,
+    PAGE_AIS_12NM,
+    PAGE_AIS_4NM,
+    PAGE_AIS_1NM,
     NUM_PAGES
 } page = PAGE_WIND;
 
-double depth = std::numeric_limits<double>::quiet_NaN();
-double awa = M_PI * 2 / 7; //std::numeric_limits<double>::quiet_NaN();
-double aws = std::numeric_limits<double>::quiet_NaN();
-double cog = std::numeric_limits<double>::quiet_NaN();
-double sog = std::numeric_limits<double>::quiet_NaN();
+double depth = 0.0;
+double awa = 0.0;
+double aws = 0.0;
+double cog = 0.0;
+double sog = 0.0;
 double latitude = std::numeric_limits<double>::quiet_NaN();
 double longitude = std::numeric_limits<double>::quiet_NaN();
 
-//double ais_range = 12.0;
+double twa = 0.0;
+double tws = 0.0;
+
 bool bPosValid = false;
 N2kVector localCog;
 N2kPos local_pos;
@@ -84,7 +81,6 @@ void setup(void) {
   buttonD1.begin();
   buttonD2.begin();
 
-#ifdef USE_DISPLAY  
   // turn on backlite
   pinMode(TFT_BACKLITE, OUTPUT);
   digitalWrite(TFT_BACKLITE, HIGH);
@@ -103,7 +99,6 @@ void setup(void) {
   tftSplashScreen();
   delay(1000);
   Serial.println(F("TFT Initialized"));
-#endif
 
   //NMEA2000.SetN2kCANMsgBufSize(8);
   //NMEA2000.SetN2kCANReceiveFrameBufSize(100);
@@ -118,7 +113,7 @@ void setup(void) {
 
 
 void loop() {
-    fakeData();
+    //fakeData();
 
   if (buttonD1.wasPressed()) {
     tft.init(135, 240); // Init ST7789 240x135
@@ -211,7 +206,6 @@ bool formatLatLong(char* buf, size_t len, double val, char posSuffix, char negSu
 }
 
 void tftSplashScreen() {
-#ifdef USE_DISPLAY  
   tft.setTextWrap(false);
   tft.fillScreen(ST77XX_BLACK);
   tft.setCursor(0, 60);
@@ -219,7 +213,6 @@ void tftSplashScreen() {
   tft.setTextColor(ST77XX_GREEN);
   tft.setTextSize(3);
   tft.println("Hello Michael");
-#endif  
 }
 
 void tftPagePosition() {
@@ -229,7 +222,7 @@ void tftPagePosition() {
     tft.fillScreen(ST77XX_BLACK);
     tft.setCursor(0, 0);
 
-    tft.setTextColor(ST77XX_GREEN);
+    tft.setTextColor(ST77XX_YELLOW);
     tft.setTextSize(3);
 
     buffer[0] = '\0';
@@ -244,7 +237,6 @@ void tftPagePosition() {
     }
     tft.println(buffer);
 
-    tft.setTextColor(ST77XX_YELLOW);
     buffer[0] = '\0';
     if (!std::isnan(cog)) {
         snprintf(buffer, sizeof(buffer), "COG %.0f %.1fkt",
@@ -252,13 +244,14 @@ void tftPagePosition() {
     }
     tft.println(buffer);
 
+    tft.setTextColor(ST77XX_RED);
     buffer[0] = '\0';
     if (!std::isnan(awa)) {
         snprintf(buffer, sizeof(buffer), "AWA %.0f %.0fkt", convertRad2Deg(awa), convertMetersPerSec2Kts(aws));
     }
     tft.println(buffer);
 
-    tft.setTextColor(ST77XX_BLUE);
+    tft.setTextColor(ST77XX_GREEN);
     buffer[0] = '\0';
     if (!std::isnan(depth)) {
         snprintf(buffer, sizeof(buffer), "%.1fft", convertMeters2Ft(depth));
@@ -303,15 +296,23 @@ void tftPageWind() {
 
     drawRadial(x0, y0, 50, convertRad2Deg(awa), 20, ST77XX_WHITE);
 
-    tft.setTextColor(ST77XX_WHITE);
     tft.setTextSize(3);
+    // True wind angle and speed at top
+    tft.setTextColor(ST77XX_BLUE);
     tft.setCursor(0, 0);
-    tft.print(0.0, 1);
+    tft.print(convertRad2Deg(twa), 0);
+    tft.setCursor(170, 0);
+    tft.print(convertMetersPerSec2Kts(tws), 1);
+
+    // Apparent wind angle and speed at bottom
+    tft.setTextColor(ST77XX_RED);
     tft.setCursor(0, 112);
     tft.print(convertRad2Deg(awa), 0);
     tft.setCursor(170, 112);
     tft.print(convertMetersPerSec2Kts(aws), 1);
 
+    // Local SOG in center of dial
+    tft.setTextColor(ST77XX_YELLOW);
     tft.setCursor(x0 - 25, y0 - 10);
     tft.print(convertMetersPerSec2Kts(sog), 1);
 
@@ -320,9 +321,9 @@ void tftPageWind() {
 // Long range plot is a 12nm radius
 // Short range plot is a 4nm radius
 // Vectors show projected position in 10min
-void tftPageAis(bool bLongRange) {
+void tftPageAis(Page pg) {
     const double radius = 60.0;
-    double range = bLongRange ? 12.0 : 4.0;
+    double range = pg == PAGE_AIS_12NM ? 12.0 : pg == PAGE_AIS_4NM ? 4.0 : 1.0;
     double range_scale = radius / range;
     double vector_scale = range_scale / 6.0;;
     int x0 = 240 / 2;
@@ -347,6 +348,8 @@ void tftPageAis(bool bLongRange) {
     tft.drawLine(x0, y0, x0 + round(localCog.getX() * vector_scale),
                  y0 + round(localCog.getY() * vector_scale), ST77XX_YELLOW);
 
+    // MA! TODO Skip rest until we have local position
+
     for (auto t : targets) {
 
         if (*t->getTimestamp() == 0) {
@@ -356,27 +359,37 @@ void tftPageAis(bool bLongRange) {
         if (p.getMagnitude() > range) {
             continue;
         }
+
+        // MA! TODO Check long/lat. Positions seem inverted somewhere. Targets are on land.
         const N2kVector& v = t->getVelocity();
         tft.drawLine(x0 + round(p.getX() * range_scale),
                      y0 + round(p.getY() * range_scale),
                      x0 + round(p.getX() * range_scale + v.getX() * vector_scale),
                      y0 + round(p.getY() * range_scale + v.getY() * vector_scale),
                      ST77XX_YELLOW);
-        tft.drawPixel(x0 + round(p.getX() * range_scale),
-                      y0 + round(p.getY() * range_scale),
-                      ST77XX_RED);
-
+        tft.drawLine(x0 + round(p.getX() * range_scale),
+                     y0 + round(p.getY() * range_scale),
+                     x0 + round(p.getX() * range_scale) + 1,
+                     y0 + round(p.getY() * range_scale),
+                     ST77XX_RED);
+        tft.drawLine(x0 + round(p.getX() * range_scale),
+                     y0 + round(p.getY() * range_scale) + 1,
+                     x0 + round(p.getX() * range_scale) + 1,
+                     y0 + round(p.getY() * range_scale) + 1,
+                     ST77XX_RED);
     }
 
 }
 
 void tftUpdate() {
 
+  // Age out old AIS entries.
+
+
   uint16_t now = millis();
   uint16_t diff = now - lastUpdate;
 
   if (diff > UPDATE_INTERVAL_MS) {
-#ifdef USE_DISPLAY  
       switch (page) {
           case PAGE_POSITION:
               tftPagePosition();
@@ -386,15 +399,12 @@ void tftUpdate() {
               tftPageWind();
               break;
 
-          case PAGE_AIS_LONG:
-              tftPageAis(true);
-              break;
-
-          case PAGE_AIS_SHORT:
-              tftPageAis(false);
+          case PAGE_AIS_12NM:
+          case PAGE_AIS_4NM:
+          case PAGE_AIS_1NM:
+              tftPageAis(page);
               break;
       }
-#endif
 
     lastUpdate = now;
   }
@@ -410,6 +420,12 @@ N2kAISTarget* getAISTarget(uint32_t mmsi) {
     N2kAISTarget* t = new N2kAISTarget(mmsi);
     targets.push_back(t);
     return t;
+}
+
+// Converts a bearing of 0...2PI into +-PI
+double getSignedBearing(double bearing)
+{
+    return bearing > M_PI ? (bearing - 2 * M_PI) : bearing;
 }
 
 
@@ -471,9 +487,9 @@ void HandleNMEA2000Msg(const tN2kMsg &N2kMsg) {
       
     case 129025:
       if (ParseN2kPositionRapid(N2kMsg, val1, val2)) {
-        longitude = val1;
-        latitude = val2;
-        local_pos.set(val2, val1);
+        latitude = val1;
+        longitude = val2;
+        local_pos.set(val1, val2);
         bPosValid = true;
       }
       break;
@@ -562,10 +578,18 @@ void HandleNMEA2000Msg(const tN2kMsg &N2kMsg) {
     case 130306:
       if (ParseN2kWindSpeed(N2kMsg, sid, val1, val2, ref2)) {
         if (ref2 == N2kWind_Apparent && !std::isnan(val1) && !std::isnan(val2)) {
-          double waRel = val2 > M_PI ? (val2 - 2 * M_PI) : val2;
 
           aws = val1;
-          awa = waRel;
+          awa = getSignedBearing(val2);
+
+          // Calculate true wind
+          N2kVector aw(aws, val2);
+          N2kVector boat(sog, 0);
+
+          N2kVector tw;
+          tw.setXY(aw.getX() - boat.getX(), aw.getY() - boat.getY());
+          tws = tw.getMagnitude();
+          twa = getSignedBearing(tw.getBearing());
         }
       }
       break;
