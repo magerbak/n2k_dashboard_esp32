@@ -75,15 +75,15 @@ bool N2kAISTarget::toString(char* buffer, size_t len) const
     int rc;
     if (m_cpa.getRelTime(now) >= 0.0 && !std::isnan(m_cpa.getDistance())) {
         rc = snprintf(buffer, len,
-                      "%s, %u, Range %.1fnm, Bearing %.0f, COG %.0f, SOG %.1fkts, CPA %.2fnm, TCPA %.1fmins",
-                      m_name, (unsigned int)m_timestamp, m_relDistance.getMagnitude(), m_relDistance.getBearing(),
+                      "%s, Range %.1fnm, Bearing %.0f, COG %.0f, SOG %.1fkts, CPA %.2fnm, TCPA %.1fmins",
+                      m_name, m_relDistance.getMagnitude(), m_relDistance.getBearing(),
                       m_velocity.getBearing(), m_velocity.getMagnitude(),
                       m_cpa.getDistance(), m_cpa.getRelTime(now) / 60);
     }
     else {
         rc = snprintf(buffer, len,
-                      "%s, %u, Range %.1fnm, Bearing %.0f, COG %.0f, SOG %.1fkts",
-                      m_name, (unsigned int)m_timestamp, m_relDistance.getMagnitude(), m_relDistance.getBearing(),
+                      "%s, Range %.1fnm, Bearing %.0f, COG %.0f, SOG %.1fkts",
+                      m_name, m_relDistance.getMagnitude(), m_relDistance.getBearing(),
                       m_velocity.getBearing(), m_velocity.getMagnitude());
     }
 
