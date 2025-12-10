@@ -8,13 +8,18 @@ public:
 
     void begin();
 
+    // Updates button state and returns whether indicated state change occured.
     bool wasPressed();
     bool wasReleased();
+
+    // Lower level methods to independently update button state and query the new state.
+    bool updateState();
+    bool isPressed() const { return m_buttonValue == m_activeState; }
 
 private:
     static const uint16_t DEBOUNCE_INTERVAL_MS = 50;
 
-    bool updateState();
+
 
     int m_pin = 0;
     int m_activeState = HIGH;

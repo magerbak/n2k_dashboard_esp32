@@ -14,8 +14,9 @@ public:
     N2kAISTarget(uint32_t mmsi);
     ~N2kAISTarget() = default;
 
-    const time_t* getTimestamp() const { return &m_timestamp; }
+    const time_t getTimestamp() const { return m_timestamp; }
     uint32_t getMmsi() const { return m_mmsi; }
+    const char* getName() const { return m_name; }
 
     void update(const N2kPos& pos, const N2kVector& vel);
     void update(const char* name);
@@ -31,6 +32,8 @@ public:
     bool toStringVesselInfo(char* buffer, size_t len) const;
 
 private:
+    static bool copyTrimmed(char* dest, const char* src, size_t size);
+
     // Time of last position update
     time_t m_timestamp = 0;
 

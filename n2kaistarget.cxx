@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <time.h>
+#include <string.h>
+#include <cmath>
 
 #include "strlcpy.h"
 #include "n2kaistarget.h"
@@ -22,7 +24,7 @@ void N2kAISTarget::update(const N2kPos &pos, const N2kVector &vel)
 void N2kAISTarget::update(const char* name)
 {
     if (name) {
-        strlcpy(m_name, name, sizeof(m_name));
+        copyTrimmed(m_name, name, sizeof(m_name));
     }
 }
 
@@ -35,14 +37,26 @@ void N2kAISTarget::update(uint8_t type, double length, double beam, double draft
     m_draft = draft;
 
     if (callsign) {
-        strlcpy(m_callsign, callsign, sizeof(m_callsign));
+        copyTrimmed(m_callsign, callsign, sizeof(m_callsign));
     }
     if (name) {
-        strlcpy(m_name, name, sizeof(m_name));
+        copyTrimmed(m_name, name, sizeof(m_name));
     }
     if (dest) {
-        strlcpy(m_dest, dest, sizeof(m_dest));
+        copyTrimmed(m_dest, dest, sizeof(m_dest));
     }
+}
+
+bool N2kAISTarget::copyTrimmed(char* dest, const char* src, size_t size) {
+    bool bIsTruncated = strlcpy(dest, src, size) >= size;
+
+    if (!bIsTruncated) {
+        size_t l = strlen(dest);
+        while (l > 0 && dest[l - 1] == ' ') {
+            dest[--l] = '\0';
+        }
+    }
+    return bIsTruncated;
 }
 
 void N2kAISTarget::calcCpa(const N2kPos &refPos, const N2kVector &refVelocity)
@@ -59,17 +73,17 @@ bool N2kAISTarget::toString(char* buffer, size_t len) const
     //m_pos.toString(pos, sizeof(pos));
 
     int rc;
-    if (m_cpa.getRelTime(now) >= 0.0) {
+    if (m_cpa.getRelTime(now) >= 0.0 && !std::isnan(m_cpa.getDistance())) {
         rc = snprintf(buffer, len,
-                          "%s, Range %.1fnm, Bearing %.0f, COG %.0f, SOG %.1fkts, CPA %.2fnm, TCPA %.1fmins",
-                          m_name, m_relDistance.getMagnitude(), m_relDistance.getBearing(),
-                          m_velocity.getBearing(), m_velocity.getMagnitude(),
-                          m_cpa.getDistance(), m_cpa.getRelTime(now) / 60);
+                      "%s, %u, Range %.1fnm, Bearing %.0f, COG %.0f, SOG %.1fkts, CPA %.2fnm, TCPA %.1fmins",
+                      m_name, (unsigned int)m_timestamp, m_relDistance.getMagnitude(), m_relDistance.getBearing(),
+                      m_velocity.getBearing(), m_velocity.getMagnitude(),
+                      m_cpa.getDistance(), m_cpa.getRelTime(now) / 60);
     }
     else {
         rc = snprintf(buffer, len,
-                      "%s, Range %.1fnm, Bearing %.0f, COG %.0f, SOG %.1fkts",
-                      m_name, m_relDistance.getMagnitude(), m_relDistance.getBearing(),
+                      "%s, %u, Range %.1fnm, Bearing %.0f, COG %.0f, SOG %.1fkts",
+                      m_name, (unsigned int)m_timestamp, m_relDistance.getMagnitude(), m_relDistance.getBearing(),
                       m_velocity.getBearing(), m_velocity.getMagnitude());
     }
 
