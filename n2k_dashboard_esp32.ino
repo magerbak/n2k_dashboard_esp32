@@ -46,6 +46,11 @@ enum Page {
     NUM_PAGES
 } page = PAGE_WIND;
 
+enum Subpage {
+    SUBPAGE_NONE,
+    SUBPAGE_AIS_INFO,
+} subpage = SUBPAGE_NONE;
+
 enum Event {
     EVT_NONE,
     EVT_D0_PRESS,
@@ -104,6 +109,7 @@ void setup(void) {
 
   // initialize TFT
   tft.init(135, 240); // Init ST7789 240x135
+  tft.cp437(true);    // Use correct code page 437 indices
   tft.setRotation(3);
   tft.fillScreen(ST77XX_BLACK);
 
@@ -133,70 +139,93 @@ void setTarget(const N2kAISTarget* p) {
     }
 }
 
-
 void handleButtonEvents(Event e) {
+    bool bNeedUpdate = false;
 
-    if (e == EVT_D2_PRESS) {
-        int p = (int)page + 1;
-        if (p == NUM_PAGES) {
-            p = 0;
+    if (subpage == SUBPAGE_NONE) {
+        // Handle event in a top level page
+
+        if (e == EVT_D2_PRESS) {
+            int p = (int)page + 1;
+            if (p == NUM_PAGES) {
+                p = 0;
+            }
+            page = (Page)p;
+            bNeedUpdate = true;
         }
-        page = (Page)p;
+        else {
+            switch (page) {
+                case PAGE_AIS_12NM:
+                case PAGE_AIS_4NM:
+                case PAGE_AIS_1NM:
+                    if (targets.size() > 0) {
+                        const N2kAISTarget* last = nullptr;
 
-        tftUpdate(true);
+                        switch (e) {
+                            case EVT_D0_PRESS:
+#if 0
+                                // Cycle back through targets
+                                for (auto t : targets) {
+                                    if (!isVisibleTarget(t, page)) {
+                                        continue;
+                                    }
+                                    if (t->getMmsi() == sel_target) {
+                                        // Select previous target
+                                        setTarget(last);
+                                        bNeedUpdate = true;
+                                        goto done;
+                                    }
+                                    last = t;
+                                }
+                                // If no match (nothing selected), select the last target
+                                setTarget(last);
+#else
+                                // Cycle forward through targets
+                                for (auto t : targets) {
+                                    if (!isVisibleTarget(t, page)) {
+                                        continue;
+                                    }
+                                    if (sel_target == 0 || (last && last->getMmsi() == sel_target)) {
+                                        // Select next target
+                                        setTarget(t);
+                                        bNeedUpdate = true;
+                                        goto done;
+                                    }
+                                    last = t;
+                                }
+                                // If no match (last target was selected), select none.
+                                setTarget(nullptr);
+#endif
+                                break;
+
+                            case EVT_D1_PRESS:
+                                if (sel_target) {
+                                    subpage = SUBPAGE_AIS_INFO;
+                                    bNeedUpdate = true;
+                                }
+                                break;
+
+                            default:
+                                break;
+                        }
+                    }
+                    break;
+
+                default:
+                    break;
+            }
+        }
     }
     else {
-        switch (page) {
-            case PAGE_AIS_12NM:
-            case PAGE_AIS_4NM:
-            case PAGE_AIS_1NM:
-                if (targets.size() > 0) {
-                    const N2kAISTarget* last = nullptr;
-
-                    switch (e) {
-                        case EVT_D0_RELEASE:
-                            // Cycle back through targets
-                            for (auto t : targets) {
-                                if (!isVisibleTarget(t, page)) {
-                                    continue;
-                                }
-                                if (t->getMmsi() == sel_target) {
-                                    // Select previous target and return
-                                    setTarget(last);
-                                    return;
-                                }
-                                last = t;
-                            }
-                            // If no match (nothing selected), select the last target
-                            setTarget(last);
-                            break;
-
-                        case EVT_D1_RELEASE:
-                            // Cycle forward through targets
-                            for (auto t : targets) {
-                                if (!isVisibleTarget(t, page)) {
-                                    continue;
-                                }
-                                if (sel_target == 0 || (last && last->getMmsi() == sel_target)) {
-                                    // Select next target and return
-                                    setTarget(t);
-                                    return;
-                                }
-                                last = t;
-                            }
-                            // If no match (last target was selected), select none.
-                            setTarget(nullptr);
-                            break;
-
-                        default:
-                            break;
-                    }
-                }
-                break;
-
-            default:
-                break;
+        if (e == EVT_D1_PRESS) {
+            subpage = SUBPAGE_NONE;
+            bNeedUpdate = true;
         }
+    }
+
+done:
+    if (bNeedUpdate) {
+        tftUpdate(true);
     }
 }
 
@@ -220,7 +249,7 @@ bool formatLatLong(char* buf, size_t len, double val, char posSuffix, char negSu
     double degs = floor(absVal);
     double mins = (absVal - degs) * 60.0;
 
-    int rc = snprintf(buf, len, "%.0f %.3f'%c", degs, mins,
+    int rc = snprintf(buf, len, "%.0f%c %.3f %c", degs, (char)0xf8, mins,
                       val >= 0 ? posSuffix : negSuffix);
     if (rc < 0 || rc == (int)len) {
         // Truncation or error
@@ -238,6 +267,35 @@ void tftSplashScreen() {
   tft.setTextSize(3);
   tft.println("Hello Michael");
 }
+
+void tftPrintJustified(const char* str, int x, int y) {
+    int16_t minx;
+    int16_t miny;
+    uint16_t w;
+    uint16_t h;
+
+    tft.getTextBounds(str, 0, 0, &minx, &miny, &w, &h);
+    if (x) {
+        x -= w + 1;
+    }
+    if (y) {
+        y -= h + 1;
+    }
+    tft.setCursor(x, y);
+    tft.print(str);
+}
+
+void tftPrintJustified(double val, int precision, const char* suffix, int x, int y) {
+    char str[64];
+
+    if (!suffix) {
+        suffix = "";
+    }
+
+    int rc = snprintf(str, sizeof(str), "%.*f%s", precision, val, suffix);
+    tftPrintJustified(str, x, y);
+}
+
 
 void tftPagePosition() {
     char buffer[128];
@@ -261,24 +319,36 @@ void tftPagePosition() {
     }
     tft.println(buffer);
 
+    tft.setCursor(0, 55);
+    tft.setTextSize(2);
+
     buffer[0] = '\0';
     if (!std::isnan(cog)) {
-        snprintf(buffer, sizeof(buffer), "COG %.0f %.1fkt",
-                 rad2Deg(cog), metersPerSec2Kts(sog));
+        snprintf(buffer, sizeof(buffer), "COG %.0f%c %.1fkts",
+                 rad2Deg(cog), (char)0xf8, metersPerSec2Kts(sog));
+    }
+    tft.println(buffer);
+
+    tft.setTextColor(ST77XX_BLUE);
+    buffer[0] = '\0';
+    if (!std::isnan(awa)) {
+        snprintf(buffer, sizeof(buffer), "TWA %.0f%c %.0fkts",
+                 rad2Deg(twa), (char)0xf8, metersPerSec2Kts(tws));
     }
     tft.println(buffer);
 
     tft.setTextColor(ST77XX_RED);
     buffer[0] = '\0';
     if (!std::isnan(awa)) {
-        snprintf(buffer, sizeof(buffer), "AWA %.0f %.0fkt", rad2Deg(awa), metersPerSec2Kts(aws));
+        snprintf(buffer, sizeof(buffer), "AWA %.0f%c %.0fkts",
+                 rad2Deg(awa), (char)0xf8, metersPerSec2Kts(aws));
     }
     tft.println(buffer);
 
     tft.setTextColor(ST77XX_GREEN);
     buffer[0] = '\0';
     if (!std::isnan(depth)) {
-        snprintf(buffer, sizeof(buffer), "%.1fft", meters2Ft(depth));
+        snprintf(buffer, sizeof(buffer), "Depth %.1fft", meters2Ft(depth));
     }
     tft.println(buffer);
 }
@@ -325,21 +395,29 @@ void tftPageWind() {
     tft.setTextColor(ST77XX_BLUE);
     tft.setCursor(0, 0);
     tft.print(rad2Deg(twa), 0);
-    tft.setCursor(170, 0);
-    tft.print(metersPerSec2Kts(tws), 1);
+    tft.print((char)0xf8);
+    tftPrintJustified(metersPerSec2Kts(tws), 1, nullptr, 240, 0);
 
     // Apparent wind angle and speed at bottom
     tft.setTextColor(ST77XX_RED);
     tft.setCursor(0, 112);
     tft.print(rad2Deg(awa), 0);
-    tft.setCursor(170, 112);
-    tft.print(metersPerSec2Kts(aws), 1);
+    tft.print((char)0xf8);
+    tftPrintJustified(metersPerSec2Kts(aws), 1, nullptr, 240, 135);
 
     // Local SOG in center of dial
     tft.setTextColor(ST77XX_YELLOW);
     tft.setCursor(x0 - 25, y0 - 10);
     tft.print(metersPerSec2Kts(sog), 1);
 
+    // Local COG to left of dial
+    tft.setTextSize(2);
+    tft.setCursor(0, 60);
+    tft.print(rad2Deg(cog), 0);
+
+    // Depth to right of dial
+    tft.setTextColor(ST77XX_GREEN);
+    tftPrintJustified(meters2Ft(depth), 1, nullptr, 240, 80);
 }
 
 
@@ -388,39 +466,22 @@ void tftPageAis(Page pg, time_t now) {
 
     // Skip rest until we have local position
     if (bPosValid) {
-        for (auto t : targets) {
-            bool bIsTarget = false;
+        const N2kAISTarget* target = nullptr;
 
+        for (auto t : targets) {
             if (!isVisibleTarget(t, page)) {
                 continue;
             }
 
             if (t->getMmsi() == sel_target) {
-                bIsTarget = true;
-                double cpad = t->getCpa()->getDistance();
-                double cpat = t->getCpa()->getRelTime(now) / 60;
-
-                tft.setTextColor(ST77XX_GREEN);
-                tft.setCursor(0, 121);
-                tft.print(t->getName());
-
-                if (cpat >= 0.0 && !std::isnan(cpad)) {
-                    tft.setCursor(170, 0);
-                    tft.print(cpad, 2);
-                    tft.print("nm");
-                    tft.setCursor(170, 121);
-                    tft.print(cpat, 1);
-                    tft.print("m");
-                }
+                target = t;
             }
 
-            const N2kVector& p = t->getRelDistance();
-            const N2kVector& v = t->getVelocity();
-            uint16_t color = bIsTarget ? ST77XX_GREEN : ST77XX_RED;
-
+            const N2kVector &p = t->getRelDistance();
+            const N2kVector &v = t->getVelocity();
             tft.fillCircle(x0 + round(p.getX() * range_scale),
                            y0 - round(p.getY() * range_scale),
-                           3, color);
+                           3, ST77XX_RED);
             tft.drawLine(x0 + round(p.getX() * range_scale),
                          y0 - round(p.getY() * range_scale),
                          x0 + round(p.getX() * range_scale + v.getX() * vector_scale),
@@ -428,9 +489,93 @@ void tftPageAis(Page pg, time_t now) {
                          ST77XX_YELLOW);
 
         }
+        if (target) {
+            double cpad = target->getCpa()->getDistance();
+            double cpat = target->getCpa()->getRelTime(now) / 60;
+            const N2kVector &p = target->getRelDistance();
+            const N2kVector &v = target->getVelocity();
+
+            tft.setTextColor(ST77XX_GREEN);
+            tft.setCursor(0, 88);
+            tft.print(p.getMagnitude(), 2);
+            tft.println("nm");
+            tft.print(p.getBearing(), 0);
+            tft.println((char)0xf8);
+            tft.print(target->getName());
+
+            if (cpat >= 0.0 && !std::isnan(cpad)) {
+                tft.setTextColor(ST77XX_RED);
+                tftPrintJustified(cpad, 2, "nm", 240,  0);
+                tftPrintJustified(cpat, 1, "m", 240,  32);
+            }
+
+            tft.fillCircle(x0 + round(p.getX()* range_scale),
+                           y0 - round(p.getY()* range_scale),
+                           3, ST77XX_GREEN);
+            tft.drawLine(x0 + round(p.getX()* range_scale),
+                         y0 - round(p.getY()* range_scale),
+                         x0 + round(p.getX()* range_scale + v.getX()* vector_scale),
+                         y0 - round(p.getY()* range_scale + v.getY()* vector_scale),
+                         ST77XX_YELLOW);
+        }
     }
 
 }
+
+void tftSubpageAisInfo() {
+    char buffer[128];
+
+    tft.setTextWrap(false);
+    tft.fillScreen(ST77XX_BLACK);
+
+    if (bPosValid) {
+        for (auto t : targets) {
+            if (!isVisibleTarget(t, page)) {
+                continue;
+            }
+
+            if (t->getMmsi() == sel_target) {
+                static const int txtSize = 13;
+                tft.setTextColor(ST77XX_GREEN);
+                tft.setTextSize(2);
+
+                tft.setCursor(0, 0);
+                tft.println(t->getName());
+                tft.print("MMSI ");
+                tft.println(t->getMmsi());
+                tft.println("");
+
+                const N2kVector& relPos = t->getRelDistance();
+                tft.print("Rng ");
+                tft.print(relPos.getMagnitude(), 2);
+                tft.print("nm ");
+                tft.print("Brg ");
+                tft.print(relPos.getBearing(), 0);
+                tft.println((char)0xf8);
+
+                const N2kVector& v = t->getVelocity();
+                tft.print("SOG ");
+                tft.print(v.getMagnitude(), 1);
+                tft.print("kts ");
+                tft.print("COG ");
+                tft.print(v.getBearing(), 0);
+                tft.println((char)0xf8);
+
+                tft.print("LOA ");
+                tft.print(t->getLength(), 1);
+                tft.print("ft ");
+                tft.print("Bm ");
+                tft.print(t->getBeam(), 1);
+                tft.println("ft ");
+
+                tft.print("Dft ");
+                tft.print(t->getDraft(), 1);
+                tft.println("ft ");
+            }
+        }
+    }
+}
+
 
 void tftUpdate(bool bForce) {
 
@@ -439,6 +584,7 @@ void tftUpdate(bool bForce) {
     time_t diff = now - lastUpdate;
     int idx_target = 0;
 
+    // MA! TODO: this should move out of presentation logic
     for (auto t = targets.begin(); t != targets.end(); ) {
         idx_target++;
         if ((*t)->getTimestamp() && now - (*t)->getTimestamp() > AIS_TIMEOUT) {
@@ -455,19 +601,27 @@ void tftUpdate(bool bForce) {
     }
 
   if (bForce || diff >= UPDATE_INTERVAL) {
-      switch (page) {
-          case PAGE_POSITION:
-              tftPagePosition();
+      switch (subpage) {
+          case SUBPAGE_NONE:
+              switch (page) {
+                  case PAGE_POSITION:
+                      tftPagePosition();
+                      break;
+
+                  case PAGE_WIND:
+                      tftPageWind();
+                      break;
+
+                  case PAGE_AIS_12NM:
+                  case PAGE_AIS_4NM:
+                  case PAGE_AIS_1NM:
+                      tftPageAis(page, now);
+                      break;
+              }
               break;
 
-          case PAGE_WIND:
-              tftPageWind();
-              break;
-
-          case PAGE_AIS_12NM:
-          case PAGE_AIS_4NM:
-          case PAGE_AIS_1NM:
-              tftPageAis(page, now);
+          case SUBPAGE_AIS_INFO:
+              tftSubpageAisInfo();
               break;
       }
 

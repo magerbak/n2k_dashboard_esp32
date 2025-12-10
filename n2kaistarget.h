@@ -18,6 +18,10 @@ public:
     uint32_t getMmsi() const { return m_mmsi; }
     const char* getName() const { return m_name; }
 
+    double getLength() const { return m_length; }
+    double getBeam() const { return m_beam; }
+    double getDraft() const { return m_draft; }
+
     void update(const N2kPos& pos, const N2kVector& vel);
     void update(const char* name);
     void update(uint8_t type, double length, double beam, double draft,
