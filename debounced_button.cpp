@@ -10,7 +10,7 @@ DebouncedButton::DebouncedButton(int pin, int activeState) :
 }
 
 void DebouncedButton::begin() {
-    pinMode(m_pin, INPUT);
+    pinMode(m_pin, m_activeState == HIGH ? INPUT : INPUT_PULLUP);
 }
 
 bool DebouncedButton::updateState() {
@@ -40,6 +40,7 @@ bool DebouncedButton::wasPressed() {
 bool DebouncedButton::wasReleased() {
     return updateState() && m_buttonValue != m_activeState;
 }
+
 
 
 
