@@ -23,6 +23,8 @@
 #include <N2kMessages.h>
 
 #include "debounced_button.h"
+#include "simple_timer.h"
+#include "data_history.h"
 #include "n2kvector.h"
 #include "n2kpos.h"
 #include "n2kunits.h"
@@ -61,16 +63,30 @@ enum Event {
     EVT_D2_RELEASE,
 };
 
+enum TextLayout {
+    TXT_RIGHT_JUSTIFIED,
+    TXT_CENTERED,
+};
+
+struct HistWindowContext {
+    uint16_t color;
+    int16_t x;
+    int16_t y;
+    int16_t w;
+    int16_t h;
+    double scale;
+};
+
 double depth = 0.0;
 double awa = 0.0;
-double aws = 0.0;
+double aws = 0.0;  // knots
 double cog = 0.0;
-double sog = 0.0;
+double sog = 0.0;  // knots
 double latitude = std::numeric_limits<double>::quiet_NaN();
 double longitude = std::numeric_limits<double>::quiet_NaN();
 
 double twa = 0.0;
-double tws = 0.0;
+double tws = 0.0;  // knots
 
 bool bPosValid = false;
 N2kVector localCog;
@@ -82,7 +98,17 @@ DebouncedButton buttonD0(0, LOW);
 DebouncedButton buttonD1(1);
 DebouncedButton buttonD2(2);
 
+SimpleTimer updateTimer;
+SimpleTimer historyTimer;
+
+DataHistory<double> awsHistory;
+DataHistory<double> twsHistory;
+DataHistory<double> sogHistory;
+//DataHistory<double> voltageHistory;
+
 uint16_t lastUpdate = 0;
+
+static const char deg_str[] = { 0xf8, '\0' };
 
 void tftSplashScreen();
 void tftUpdate(bool bForce);
@@ -97,6 +123,14 @@ void setup(void) {
   buttonD0.begin();
   buttonD1.begin();
   buttonD2.begin();
+
+  updateTimer.begin(nullptr, 1000, updateCallback);
+  historyTimer.begin(nullptr, 1000 * 10, historyCallback);
+
+  // Record history of AWS, TWS and SOG for last 60mins.
+  awsHistory.begin(60);
+  twsHistory.begin(60);
+  sogHistory.begin(60);
 
   // turn on backlite
   pinMode(TFT_BACKLITE, OUTPUT);
@@ -137,6 +171,52 @@ void setTarget(const N2kAISTarget* p) {
         //Serial.println("none");
         sel_target = 0;
     }
+}
+
+bool updateCallback(void* user) {
+    bool bChanged = false;
+    time_t now = time(nullptr);
+    time_t diff = now - lastUpdate;
+
+    (void)user;
+
+    // Age out stale AIS targets
+    for (auto t = targets.begin(); t != targets.end();) {
+        if ((*t)->getTimestamp() && now - (*t)->getTimestamp() > AIS_TIMEOUT) {
+            if ((*t)->getMmsi() == sel_target) {
+                sel_target = 0;
+            }
+            free(*t);
+            t = targets.erase(t);
+            bChanged = true;
+        }
+        else {
+            ++t;
+        }
+    }
+
+    static int xxx = 0;
+    if (++xxx == 60) {
+        awsHistory.updateData(25.0);
+        twsHistory.updateData(25.0);
+    }
+    awsHistory.updateData(aws);
+    twsHistory.updateData(tws);
+    sogHistory.updateData(sog);
+
+    if (bChanged) {
+        tftUpdate(true);
+    }
+
+    return true;
+}
+
+bool historyCallback(void* user) {
+    awsHistory.updateHistory();
+    twsHistory.updateHistory();
+    sogHistory.updateHistory();
+
+    return true;
 }
 
 void handleButtonEvents(Event e) {
@@ -230,6 +310,11 @@ done:
 }
 
 void loop() {
+    uint32_t t = millis();
+
+    updateTimer.tick(t);
+    historyTimer.tick(t);
+
     if (buttonD0.updateState()) {
         handleButtonEvents(buttonD0.isPressed() ? EVT_D0_PRESS : EVT_D0_RELEASE);
     }
@@ -268,24 +353,32 @@ void tftSplashScreen() {
   tft.println("Hello Michael");
 }
 
-void tftPrintJustified(const char* str, int x, int y) {
+void tftPrintJustified(const char* str, int x, int y, TextLayout fmt) {
     int16_t minx;
     int16_t miny;
     uint16_t w;
     uint16_t h;
 
     tft.getTextBounds(str, 0, 0, &minx, &miny, &w, &h);
-    if (x) {
-        x -= w + 1;
-    }
-    if (y) {
-        y -= h + 1;
+    switch (fmt) {
+        case TXT_RIGHT_JUSTIFIED:
+            if (x) {
+                x -= w + 1;
+            }
+            if (y) {
+                y -= h + 1;
+            }
+            break;
+
+        case TXT_CENTERED:
+            x -= (w + 1) / 2;
+            break;
     }
     tft.setCursor(x, y);
     tft.print(str);
 }
 
-void tftPrintJustified(double val, int precision, const char* suffix, int x, int y) {
+void tftPrintJustified(double val, int precision, const char* suffix, int x, int y, TextLayout fmt) {
     char str[64];
 
     if (!suffix) {
@@ -293,7 +386,7 @@ void tftPrintJustified(double val, int precision, const char* suffix, int x, int
     }
 
     int rc = snprintf(str, sizeof(str), "%.*f%s", precision, val, suffix);
-    tftPrintJustified(str, x, y);
+    tftPrintJustified(str, x, y, fmt);
 }
 
 
@@ -325,7 +418,7 @@ void tftPagePosition() {
     buffer[0] = '\0';
     if (!std::isnan(cog)) {
         snprintf(buffer, sizeof(buffer), "COG %.0f%c %.1fkts",
-                 rad2Deg(cog), (char)0xf8, metersPerSec2Kts(sog));
+                 rad2Deg(cog), (char)0xf8, sog);
     }
     tft.println(buffer);
 
@@ -333,7 +426,7 @@ void tftPagePosition() {
     buffer[0] = '\0';
     if (!std::isnan(awa)) {
         snprintf(buffer, sizeof(buffer), "TWA %.0f%c %.0fkts",
-                 rad2Deg(twa), (char)0xf8, metersPerSec2Kts(tws));
+                 rad2Deg(twa), (char)0xf8, tws);
     }
     tft.println(buffer);
 
@@ -341,7 +434,7 @@ void tftPagePosition() {
     buffer[0] = '\0';
     if (!std::isnan(awa)) {
         snprintf(buffer, sizeof(buffer), "AWA %.0f%c %.0fkts",
-                 rad2Deg(awa), (char)0xf8, metersPerSec2Kts(aws));
+                 rad2Deg(awa), (char)0xf8, aws);
     }
     tft.println(buffer);
 
@@ -361,12 +454,44 @@ void drawRadial(int x0,  int y0,  int r, int bearing, int len, uint16_t color) {
                  x0 + round(ax * (r - len)), y0 + round(ay * (r - len)), color);
 }
 
+void windHistoryCallback(void* user, const double* dataMin, const double* dataMax,
+                         size_t len, size_t offset) {
+    HistWindowContext* ctx = (HistWindowContext*)user;
+
+    // MA! TODO Currently ignoring x scaling
+    for (unsigned int i = 0; i < len; i++) {
+        int16_t dmax = round(dataMax[i] * ctx->scale);
+        int16_t dmin = round(dataMin[i] * ctx->scale);
+        tft.drawFastVLine(ctx->x + offset + i, ctx->y + ctx->h - dmax, dmax - dmin, ctx->color);
+    }
+}
+
 void tftPageWind() {
+    struct HistWindowContext hist_window;
+
     int x0 = 240 / 2;
     int y0 = 135 / 2;
 
     tft.setTextWrap(false);
     tft.fillScreen(ST77XX_BLACK);
+
+    // TWS history top right
+    hist_window.color = ST77XX_BLUE;
+    hist_window.x = 240 - twsHistory.getLength();
+    hist_window.y = 30;
+    hist_window.w = 60;
+    hist_window.h = 30;
+    hist_window.scale = hist_window.h / 25.0;
+    twsHistory.forEachData(windHistoryCallback, &hist_window);
+
+    // AWS history bottom right
+    hist_window.color = ST77XX_RED;
+    hist_window.x = 240 - twsHistory.getLength();
+    hist_window.y = 70;
+    hist_window.w = 60;
+    hist_window.h = 30;
+    hist_window.scale = hist_window.h / 25.0;
+    awsHistory.forEachData(windHistoryCallback, &hist_window);
 
     tft.startWrite();
     // Draw port quadrants in red
@@ -396,28 +521,25 @@ void tftPageWind() {
     tft.setCursor(0, 0);
     tft.print(rad2Deg(twa), 0);
     tft.print((char)0xf8);
-    tftPrintJustified(metersPerSec2Kts(tws), 1, nullptr, 240, 0);
+    tftPrintJustified(tws, 1, nullptr, 240, 0, TXT_RIGHT_JUSTIFIED);
 
     // Apparent wind angle and speed at bottom
     tft.setTextColor(ST77XX_RED);
     tft.setCursor(0, 112);
     tft.print(rad2Deg(awa), 0);
     tft.print((char)0xf8);
-    tftPrintJustified(metersPerSec2Kts(aws), 1, nullptr, 240, 135);
+    tftPrintJustified(aws, 1, nullptr, 240, 135, TXT_RIGHT_JUSTIFIED);
 
-    // Local SOG in center of dial
+    // Local SOG and COG in center of dial
     tft.setTextColor(ST77XX_YELLOW);
-    tft.setCursor(x0 - 25, y0 - 10);
-    tft.print(metersPerSec2Kts(sog), 1);
-
-    // Local COG to left of dial
     tft.setTextSize(2);
-    tft.setCursor(0, 60);
-    tft.print(rad2Deg(cog), 0);
+    tftPrintJustified(sog, 1, nullptr, x0, y0 - 15, TXT_CENTERED);
+    tftPrintJustified(rad2Deg(cog), 0, deg_str, x0, y0 + 5, TXT_CENTERED);
 
-    // Depth to right of dial
+    // Depth to left of dial
     tft.setTextColor(ST77XX_GREEN);
-    tftPrintJustified(meters2Ft(depth), 1, nullptr, 240, 80);
+    tft.setCursor(0, 60);
+    tft.print(meters2Ft(depth), 1);
 }
 
 
@@ -435,6 +557,14 @@ bool isVisibleTarget(const N2kAISTarget* t, Page pg) {
 
     return true;
 }
+
+bool isDangerousTarget(double d, double t) {
+    if (!std::isnan(d) && !std::isnan(t)) {
+        return d < 1.0 && t > 0 && t < 60;
+    }
+    return false;
+}
+
 
 // AIS plot at various ranges defined by page ID.
 // Vectors show projected position in 5min
@@ -479,9 +609,13 @@ void tftPageAis(Page pg, time_t now) {
 
             const N2kVector &p = t->getRelDistance();
             const N2kVector &v = t->getVelocity();
+            double cpad = t->getCpa()->getDistance();
+            double cpat = t->getCpa()->getRelTime(now) / 60;
+            bool bDangerous = isDangerousTarget(cpad, cpat);
+
             tft.fillCircle(x0 + round(p.getX() * range_scale),
                            y0 - round(p.getY() * range_scale),
-                           3, ST77XX_RED);
+                           3, bDangerous ? ST77XX_RED : ST77XX_GREEN);
             tft.drawLine(x0 + round(p.getX() * range_scale),
                          y0 - round(p.getY() * range_scale),
                          x0 + round(p.getX() * range_scale + v.getX() * vector_scale),
@@ -491,6 +625,7 @@ void tftPageAis(Page pg, time_t now) {
         }
         if (target) {
             double cpad = target->getCpa()->getDistance();
+            double cpab = target->getCpa()->getBearing();
             double cpat = target->getCpa()->getRelTime(now) / 60;
             const N2kVector &p = target->getRelDistance();
             const N2kVector &v = target->getVelocity();
@@ -505,13 +640,14 @@ void tftPageAis(Page pg, time_t now) {
 
             if (cpat >= 0.0 && !std::isnan(cpad)) {
                 tft.setTextColor(ST77XX_RED);
-                tftPrintJustified(cpad, 2, "nm", 240,  0);
-                tftPrintJustified(cpat, 1, "m", 240,  32);
+                tftPrintJustified(cpad, 2, "nm", 240,  0, TXT_RIGHT_JUSTIFIED);
+                tftPrintJustified(cpab, 0, deg_str, 240,  32, TXT_RIGHT_JUSTIFIED);
+                tftPrintJustified(cpat, 1, "m", 240,  48, TXT_RIGHT_JUSTIFIED);
             }
 
             tft.fillCircle(x0 + round(p.getX()* range_scale),
                            y0 - round(p.getY()* range_scale),
-                           3, ST77XX_GREEN);
+                           3, ST77XX_WHITE);
             tft.drawLine(x0 + round(p.getX()* range_scale),
                          y0 - round(p.getY()* range_scale),
                          x0 + round(p.getX()* range_scale + v.getX()* vector_scale),
@@ -582,23 +718,6 @@ void tftUpdate(bool bForce) {
   // Age out old AIS entries.
     time_t now = time(nullptr);
     time_t diff = now - lastUpdate;
-    int idx_target = 0;
-
-    // MA! TODO: this should move out of presentation logic
-    for (auto t = targets.begin(); t != targets.end(); ) {
-        idx_target++;
-        if ((*t)->getTimestamp() && now - (*t)->getTimestamp() > AIS_TIMEOUT) {
-            if ((*t)->getMmsi() == sel_target) {
-                sel_target = 0;
-            }
-            free(*t);
-            t = targets.erase(t);
-            bForce = true;
-        }
-        else {
-            ++t;
-        }
-    }
 
   if (bForce || diff >= UPDATE_INTERVAL) {
       switch (subpage) {
@@ -727,7 +846,7 @@ void HandleNMEA2000Msg(const tN2kMsg &N2kMsg) {
       if (ParseN2kCOGSOGRapid(N2kMsg, sid, ref, val1, val2)) {
         if (ref == 0 && !std::isnan(val1) && !std::isnan(val2)) {
           cog = val1;
-          sog = val2;
+          sog = metersPerSec2Kts(val2);
           localCog.set(metersPerSec2Kts(val2), rad2Deg(val1));
         }
       }
@@ -808,7 +927,7 @@ void HandleNMEA2000Msg(const tN2kMsg &N2kMsg) {
       if (ParseN2kWindSpeed(N2kMsg, sid, val1, val2, ref2)) {
         if (ref2 == N2kWind_Apparent && !std::isnan(val1) && !std::isnan(val2)) {
 
-          aws = val1;
+          aws = metersPerSec2Kts(val1);
           awa = getSignedBearing(val2);
 
           // Calculate true wind
