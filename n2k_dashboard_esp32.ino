@@ -30,6 +30,9 @@
 #include "n2kunits.h"
 #include "n2kaistarget.h"
 
+#define DISPLAY_WIDTH   240
+#define DISPLAY_HEIGHT  135
+
 #define UPDATE_INTERVAL  1
 #define AIS_TIMEOUT      60
 
@@ -50,6 +53,13 @@ enum Page {
 
 enum Subpage {
     SUBPAGE_NONE,
+
+    SUBPAGE_HIST_TWS,
+    SUBPAGE_HIST_AWS,
+    SUBPAGE_HIST_SOG,
+    SUBPAGE_HIST_DEPTH,
+    SUBPAGE_HIST_SEPARATOR,
+
     SUBPAGE_AIS_INFO,
 } subpage = SUBPAGE_NONE;
 
@@ -74,8 +84,20 @@ struct HistWindowContext {
     int16_t y;
     int16_t w;
     int16_t h;
-    double scale;
+
+    unsigned int range_x;
+    unsigned int range_y;
 };
+
+struct HistStatsContext {
+    bool bFirst = true;
+    size_t len = 0;
+
+    double min = 0.0;
+    double max = 1.0;
+    double avg = 0.0;
+};
+
 
 double depth = 0.0;
 double awa = 0.0;
@@ -104,6 +126,7 @@ SimpleTimer historyTimer;
 DataHistory<double> awsHistory;
 DataHistory<double> twsHistory;
 DataHistory<double> sogHistory;
+DataHistory<double> depthHistory;
 //DataHistory<double> voltageHistory;
 
 uint16_t lastUpdate = 0;
@@ -131,6 +154,7 @@ void setup(void) {
   awsHistory.begin(60);
   twsHistory.begin(60);
   sogHistory.begin(60);
+  depthHistory.begin(60);
 
   // turn on backlite
   pinMode(TFT_BACKLITE, OUTPUT);
@@ -142,7 +166,7 @@ void setup(void) {
   delay(10);
 
   // initialize TFT
-  tft.init(135, 240); // Init ST7789 240x135
+  tft.init(DISPLAY_HEIGHT, DISPLAY_WIDTH); // Init ST7789 DISPLAY_WIDTHxDISPLAY_HEIGHT
   tft.cp437(true);    // Use correct code page 437 indices
   tft.setRotation(3);
   tft.fillScreen(ST77XX_BLACK);
@@ -203,6 +227,9 @@ bool updateCallback(void* user) {
     awsHistory.updateData(aws);
     twsHistory.updateData(tws);
     sogHistory.updateData(sog);
+    if (depth > 0.0) {
+        depthHistory.updateData(depth);
+    }
 
     if (bChanged) {
         tftUpdate(true);
@@ -215,18 +242,21 @@ bool historyCallback(void* user) {
     awsHistory.updateHistory();
     twsHistory.updateHistory();
     sogHistory.updateHistory();
+    depthHistory.updateHistory();
 
     return true;
 }
 
 void handleButtonEvents(Event e) {
+    const N2kAISTarget* last = nullptr;
     bool bNeedUpdate = false;
+    int p;
 
     if (subpage == SUBPAGE_NONE) {
         // Handle event in a top level page
 
         if (e == EVT_D2_PRESS) {
-            int p = (int)page + 1;
+            p = (int)page + 1;
             if (p == NUM_PAGES) {
                 p = 0;
             }
@@ -235,31 +265,24 @@ void handleButtonEvents(Event e) {
         }
         else {
             switch (page) {
+                case PAGE_WIND:
+                    switch (e) {
+                        case EVT_D1_PRESS:
+                            subpage = SUBPAGE_HIST_TWS;
+                            bNeedUpdate = true;
+                            break;
+
+                        default:
+                            break;
+                    }
+                    break;
+
                 case PAGE_AIS_12NM:
                 case PAGE_AIS_4NM:
                 case PAGE_AIS_1NM:
                     if (targets.size() > 0) {
-                        const N2kAISTarget* last = nullptr;
-
                         switch (e) {
                             case EVT_D0_PRESS:
-#if 0
-                                // Cycle back through targets
-                                for (auto t : targets) {
-                                    if (!isVisibleTarget(t, page)) {
-                                        continue;
-                                    }
-                                    if (t->getMmsi() == sel_target) {
-                                        // Select previous target
-                                        setTarget(last);
-                                        bNeedUpdate = true;
-                                        goto done;
-                                    }
-                                    last = t;
-                                }
-                                // If no match (nothing selected), select the last target
-                                setTarget(last);
-#else
                                 // Cycle forward through targets
                                 for (auto t : targets) {
                                     if (!isVisibleTarget(t, page)) {
@@ -275,7 +298,6 @@ void handleButtonEvents(Event e) {
                                 }
                                 // If no match (last target was selected), select none.
                                 setTarget(nullptr);
-#endif
                                 break;
 
                             case EVT_D1_PRESS:
@@ -300,6 +322,54 @@ void handleButtonEvents(Event e) {
         if (e == EVT_D1_PRESS) {
             subpage = SUBPAGE_NONE;
             bNeedUpdate = true;
+        } else {
+            switch (subpage) {
+                case SUBPAGE_HIST_TWS:
+                case SUBPAGE_HIST_AWS:
+                case SUBPAGE_HIST_SOG:
+                case SUBPAGE_HIST_DEPTH:
+                    switch (e) {
+                        case EVT_D0_PRESS:
+                            p = (int)subpage + 1;
+                            if (p == SUBPAGE_HIST_SEPARATOR) {
+                                p = SUBPAGE_HIST_TWS;
+                            }
+                            subpage = (Subpage)p;
+                            bNeedUpdate = true;
+                            break;
+
+                        case EVT_D1_PRESS:
+                            subpage = SUBPAGE_NONE;
+                            bNeedUpdate = true;
+                            break;
+
+                        default:
+                            break;
+                    }
+                    break;
+
+                case SUBPAGE_AIS_INFO:
+                    // Cycle forward through targets
+                    for (auto t : targets) {
+                        if (!isVisibleTarget(t, page)) {
+                            continue;
+                        }
+                        if (sel_target == 0 || (last && last->getMmsi() == sel_target)) {
+                            // Select next target
+                            setTarget(t);
+                            bNeedUpdate = true;
+                            goto done;
+                        }
+                        last = t;
+                    }
+                    // If no match (last target was selected), select none.
+                    setTarget(nullptr);
+                    break;
+
+
+                default:
+                    break;
+            }
         }
     }
 
@@ -441,7 +511,7 @@ void tftPagePosition() {
     tft.setTextColor(ST77XX_GREEN);
     buffer[0] = '\0';
     if (!std::isnan(depth)) {
-        snprintf(buffer, sizeof(buffer), "Depth %.1fft", meters2Ft(depth));
+        snprintf(buffer, sizeof(buffer), "Depth %.1fft", depth);
     }
     tft.println(buffer);
 }
@@ -454,44 +524,80 @@ void drawRadial(int x0,  int y0,  int r, int bearing, int len, uint16_t color) {
                  x0 + round(ax * (r - len)), y0 + round(ay * (r - len)), color);
 }
 
-void windHistoryCallback(void* user, const double* dataMin, const double* dataMax,
+void statsHistoryCallback(void* user, const double* dataMin, const double* dataMax,
+                          size_t len, size_t offset) {
+    HistStatsContext* ctx = (HistStatsContext*) user;
+
+    for (unsigned int i = 0; i < len; i++) {
+        if (ctx->bFirst) {
+            // Don't allow max to be less than 1.0 to avoid divide by zero and
+            // other scaling issues.
+            ctx->max = dataMax[i] < 1.0 ? 1.0 : dataMax[i];
+            ctx->min = dataMin[i];
+        }
+        else {
+            if (ctx->max < dataMax[i]) {
+                ctx->max = dataMax[i];
+            }
+            if (ctx->min > dataMin[i]) {
+                ctx->min = dataMin[i];
+            }
+        }
+        ctx->avg += dataMax[i] + dataMin[i];
+        ctx->bFirst = false;
+    }
+
+    if (ctx->len && offset + len == ctx->len) {
+        // We're finished.
+        ctx->avg = ctx->avg / (2 * ctx->len);
+    }
+}
+
+void drawHistoryCallback(void* user, const double* dataMin, const double* dataMax,
                          size_t len, size_t offset) {
     HistWindowContext* ctx = (HistWindowContext*)user;
 
-    // MA! TODO Currently ignoring x scaling
+    double scale_x = ctx->w / ctx->range_x;
+    double scale_y = ctx->h / ctx->range_y;
+
     for (unsigned int i = 0; i < len; i++) {
-        int16_t dmax = round(dataMax[i] * ctx->scale);
-        int16_t dmin = round(dataMin[i] * ctx->scale);
-        tft.drawFastVLine(ctx->x + offset + i, ctx->y + ctx->h - dmax, dmax - dmin, ctx->color);
+        int16_t dmax = round(dataMax[i] * scale_y);
+        int16_t dmin = round(dataMin[i] * scale_y);
+
+        tft.drawFastVLine(ctx->x + round((offset + i) * scale_x),
+                          ctx->y + ctx->h - dmax,
+                          dmax - dmin + 1, ctx->color);
     }
 }
 
 void tftPageWind() {
     struct HistWindowContext hist_window;
 
-    int x0 = 240 / 2;
-    int y0 = 135 / 2;
+    int x0 = DISPLAY_WIDTH / 2;
+    int y0 = DISPLAY_HEIGHT / 2;
 
     tft.setTextWrap(false);
     tft.fillScreen(ST77XX_BLACK);
 
     // TWS history top right
     hist_window.color = ST77XX_BLUE;
-    hist_window.x = 240 - twsHistory.getLength();
+    hist_window.x = DISPLAY_WIDTH - twsHistory.getLength();
     hist_window.y = 30;
     hist_window.w = 60;
     hist_window.h = 30;
-    hist_window.scale = hist_window.h / 25.0;
-    twsHistory.forEachData(windHistoryCallback, &hist_window);
+    hist_window.range_x = twsHistory.getSize();
+    hist_window.range_y = hist_window.h;
+    twsHistory.forEachData(drawHistoryCallback, &hist_window);
 
     // AWS history bottom right
     hist_window.color = ST77XX_RED;
-    hist_window.x = 240 - twsHistory.getLength();
+    hist_window.x = DISPLAY_WIDTH - twsHistory.getLength();
     hist_window.y = 70;
     hist_window.w = 60;
     hist_window.h = 30;
-    hist_window.scale = hist_window.h / 25.0;
-    awsHistory.forEachData(windHistoryCallback, &hist_window);
+    hist_window.range_x = awsHistory.getSize();
+    hist_window.range_y = hist_window.h;
+    awsHistory.forEachData(drawHistoryCallback, &hist_window);
 
     tft.startWrite();
     // Draw port quadrants in red
@@ -515,20 +621,30 @@ void tftPageWind() {
 
     drawRadial(x0, y0, 50, rad2Deg(awa), 20, ST77XX_WHITE);
 
-    tft.setTextSize(3);
     // True wind angle and speed at top
     tft.setTextColor(ST77XX_BLUE);
+    tft.setTextSize(3);
     tft.setCursor(0, 0);
     tft.print(rad2Deg(twa), 0);
-    tft.print((char)0xf8);
-    tftPrintJustified(tws, 1, nullptr, 240, 0, TXT_RIGHT_JUSTIFIED);
+    tft.println((char)0xf8);
+    tft.setTextSize(1);
+    tft.print("TWA");
+
+    tft.setTextSize(3);
+    tftPrintJustified(tws, 1, nullptr, DISPLAY_WIDTH, 0, TXT_RIGHT_JUSTIFIED);
 
     // Apparent wind angle and speed at bottom
     tft.setTextColor(ST77XX_RED);
+    tft.setTextSize(1);
+    tft.setCursor(0, 102);
+    tft.print("AWA");
+    tft.setTextSize(3);
     tft.setCursor(0, 112);
     tft.print(rad2Deg(awa), 0);
     tft.print((char)0xf8);
-    tftPrintJustified(aws, 1, nullptr, 240, 135, TXT_RIGHT_JUSTIFIED);
+
+    tft.setTextSize(3);
+    tftPrintJustified(aws, 1, nullptr, DISPLAY_WIDTH, DISPLAY_HEIGHT, TXT_RIGHT_JUSTIFIED);
 
     // Local SOG and COG in center of dial
     tft.setTextColor(ST77XX_YELLOW);
@@ -539,7 +655,63 @@ void tftPageWind() {
     // Depth to left of dial
     tft.setTextColor(ST77XX_GREEN);
     tft.setCursor(0, 60);
-    tft.print(meters2Ft(depth), 1);
+    tft.println(depth, 1);
+    tft.setTextSize(1);
+    tft.print("ft");
+}
+
+void tftSubpageHistory(const char* title, const DataHistory<double>* hist, uint16_t color) {
+    struct HistStatsContext hist_stats;
+    struct HistWindowContext hist_window;
+
+    tft.setTextWrap(false);
+    tft.fillScreen(ST77XX_BLACK);
+
+    hist_stats.len = hist->getLength();
+    hist->forEachData(statsHistoryCallback, &hist_stats);
+
+    // Vertical scale
+    int t = ((int)hist_stats.max / 10) * 10;
+    while (t > 0) {
+        tft.drawFastHLine(0, DISPLAY_HEIGHT - 3 - round(t * (DISPLAY_HEIGHT - 3) / hist_stats.max),
+                          DISPLAY_WIDTH, ST77XX_WHITE);
+        t -= 10;
+    }
+
+    // Horizontal scale
+    tft.drawFastHLine(0, DISPLAY_HEIGHT - 3, DISPLAY_WIDTH, ST77XX_WHITE);
+    for (t = 0; t < hist->getSize(); t += 10) {
+        tft.drawFastVLine(DISPLAY_WIDTH - round(t * DISPLAY_WIDTH / hist->getSize()),
+                          DISPLAY_HEIGHT - 2, 2, ST77XX_WHITE);
+    }
+
+    // Title
+    tft.setTextColor(color);
+    tft.setTextSize(3);
+    tft.setCursor(0, 0);
+    tft.print(title);
+
+    tft.setTextSize(2);
+    tft.setCursor(0, 81);
+    tft.print("Max ");
+    tft.println(hist_stats.max, 0);
+
+    tft.print("Avg ");
+    tft.println(hist_stats.avg, 0);
+
+    tft.print("Min ");
+    tft.println(hist_stats.min, 0);
+
+    double scale_x = DISPLAY_WIDTH / hist->getSize();
+    hist_window.color = color;
+    hist_window.x = DISPLAY_WIDTH - round(hist->getLength() * scale_x);
+    hist_window.y = 0;
+    hist_window.w = DISPLAY_WIDTH;
+    hist_window.h = DISPLAY_HEIGHT - 3;
+    hist_window.range_x = hist->getSize();
+    hist_window.range_y = hist_stats.max;
+
+    hist->forEachData(drawHistoryCallback, &hist_window);
 }
 
 
@@ -573,8 +745,8 @@ void tftPageAis(Page pg, time_t now) {
     double range = pg == PAGE_AIS_12NM ? 12.0 : pg == PAGE_AIS_4NM ? 4.0 : 1.0;
     double range_scale = radius / range;
     double vector_scale = range_scale / 12.0;;
-    int x0 = 240 / 2;
-    int y0 = 135 / 2;
+    int x0 = DISPLAY_WIDTH / 2;
+    int y0 = DISPLAY_HEIGHT / 2;
 
     tft.setTextWrap(false);
     tft.fillScreen(ST77XX_BLACK);
@@ -640,9 +812,9 @@ void tftPageAis(Page pg, time_t now) {
 
             if (cpat >= 0.0 && !std::isnan(cpad)) {
                 tft.setTextColor(ST77XX_RED);
-                tftPrintJustified(cpad, 2, "nm", 240,  0, TXT_RIGHT_JUSTIFIED);
-                tftPrintJustified(cpab, 0, deg_str, 240,  32, TXT_RIGHT_JUSTIFIED);
-                tftPrintJustified(cpat, 1, "m", 240,  48, TXT_RIGHT_JUSTIFIED);
+                tftPrintJustified(cpad, 2, "nm", DISPLAY_WIDTH,  0, TXT_RIGHT_JUSTIFIED);
+                tftPrintJustified(cpab, 0, deg_str, DISPLAY_WIDTH,  32, TXT_RIGHT_JUSTIFIED);
+                tftPrintJustified(cpat, 1, "m", DISPLAY_WIDTH,  48, TXT_RIGHT_JUSTIFIED);
             }
 
             tft.fillCircle(x0 + round(p.getX()* range_scale),
@@ -739,6 +911,22 @@ void tftUpdate(bool bForce) {
               }
               break;
 
+          case SUBPAGE_HIST_TWS:
+              tftSubpageHistory("TWS", &twsHistory, ST77XX_BLUE);
+              break;
+
+          case SUBPAGE_HIST_AWS:
+              tftSubpageHistory("AWS", &awsHistory, ST77XX_RED);
+              break;
+
+          case SUBPAGE_HIST_SOG:
+              tftSubpageHistory("SOG", &sogHistory, ST77XX_YELLOW);
+              break;
+
+          case SUBPAGE_HIST_DEPTH:
+              tftSubpageHistory("Depth", &depthHistory, ST77XX_GREEN);
+              break;
+
           case SUBPAGE_AIS_INFO:
               tftSubpageAisInfo();
               break;
@@ -819,7 +1007,7 @@ void HandleNMEA2000Msg(const tN2kMsg &N2kMsg) {
     // Handle various PGNs here
     case 128267:
       if (ParseN2kWaterDepth(N2kMsg, sid, val1, val2)) {
-        depth = val1 + val2;
+          depth = meters2Ft(val1 + val2);
       }
       break;
       
