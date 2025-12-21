@@ -492,10 +492,11 @@ void tftPagePosition() {
     }
     tft.println(buffer);
 
+    double twd = cog + twa;
     tft.setTextColor(ST77XX_BLUE);
     buffer[0] = '\0';
     if (!std::isnan(awa)) {
-        snprintf(buffer, sizeof(buffer), "TWA %.0f%c %.0fkts",
+        snprintf(buffer, sizeof(buffer), "TWD %.0f%c %.0fkts",
                  rad2Deg(twa), (char)0xf8, tws);
     }
     tft.println(buffer);
