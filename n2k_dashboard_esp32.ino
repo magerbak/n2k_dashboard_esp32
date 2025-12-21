@@ -9,6 +9,8 @@
   internal CAN controller (external transceiver required).
 
  **************************************************************************/
+#define TESTING
+
 #include <limits>
 #include <list>
 #include <Adafruit_GFX.h>    // Core graphics library
@@ -35,6 +37,13 @@
 
 #define UPDATE_INTERVAL  1
 #define AIS_TIMEOUT      60
+
+#define HISTORY_SAMPLE_INTERVAL_MS 1000
+#ifdef TESTING
+  #define HISTORY_AGGREGATION_INTERVAL_MS (10 * 1000)
+#else
+  #define HISTORY_AGGREGATION_INTERVAL_MS (60 * 1000)
+#endif
 
 tNMEA2000 &NMEA2000=*(new tNMEA2000_esp32());
 
@@ -99,15 +108,16 @@ struct HistStatsContext {
 };
 
 
-double depth = 0.0;
-double awa = 0.0;
+double depth = 0.0; // ft
+double awa = 0.0;  // rads
 double aws = 0.0;  // knots
-double cog = 0.0;
+double cog = 0.0;  // rads
 double sog = 0.0;  // knots
-double latitude = std::numeric_limits<double>::quiet_NaN();
-double longitude = std::numeric_limits<double>::quiet_NaN();
+double hdg = 0.0;  // rads
+double latitude = std::numeric_limits<double>::quiet_NaN();  // degs
+double longitude = std::numeric_limits<double>::quiet_NaN(); // degs
 
-double twa = 0.0;
+double twa = 0.0;  // rads
 double tws = 0.0;  // knots
 
 bool bPosValid = false;
@@ -147,8 +157,8 @@ void setup(void) {
   buttonD1.begin();
   buttonD2.begin();
 
-  updateTimer.begin(nullptr, 1000, updateCallback);
-  historyTimer.begin(nullptr, 1000 * 10, historyCallback);
+  updateTimer.begin(nullptr, HISTORY_SAMPLE_INTERVAL_MS, updateCallback);
+  historyTimer.begin(nullptr, HISTORY_AGGREGATION_INTERVAL_MS, historyCallback);
 
   // Record history of AWS, TWS and SOG for last 60mins.
   awsHistory.begin(60);
@@ -219,11 +229,6 @@ bool updateCallback(void* user) {
         }
     }
 
-    static int xxx = 0;
-    if (++xxx == 60) {
-        awsHistory.updateData(25.0);
-        twsHistory.updateData(25.0);
-    }
     awsHistory.updateData(aws);
     twsHistory.updateData(tws);
     sogHistory.updateData(sog);
@@ -486,18 +491,25 @@ void tftPagePosition() {
     tft.setTextSize(2);
 
     buffer[0] = '\0';
+    if (!std::isnan(hdg)) {
+        snprintf(buffer, sizeof(buffer), "HDG %.0f%c",
+                 rad2Deg(hdg), (char)0xf8);
+    }
+    tft.println(buffer);
+
+    buffer[0] = '\0';
     if (!std::isnan(cog)) {
         snprintf(buffer, sizeof(buffer), "COG %.0f%c %.1fkts",
                  rad2Deg(cog), (char)0xf8, sog);
     }
     tft.println(buffer);
 
-    double twd = cog + twa;
+    double twd = hdg + twa;
     tft.setTextColor(ST77XX_BLUE);
     buffer[0] = '\0';
     if (!std::isnan(awa)) {
         snprintf(buffer, sizeof(buffer), "TWD %.0f%c %.0fkts",
-                 rad2Deg(twa), (char)0xf8, tws);
+                 rad2Deg(twd), (char)0xf8, tws);
     }
     tft.println(buffer);
 
@@ -1004,6 +1016,17 @@ void HandleNMEA2000Msg(const tN2kMsg &N2kMsg) {
   tN2kAISMode mode;
   bool state;
 
+  double heading;
+  double deviation;
+  double variation;
+#if 0
+  tN2kDataMode dataMode;
+  tN2kHeadingReference cogReference;
+  double speedThroughWater;
+  double currentSet;
+  double currentDrift;
+#endif
+
   switch (N2kMsg.PGN) {
     // Handle various PGNs here
     case 128267:
@@ -1130,6 +1153,35 @@ void HandleNMEA2000Msg(const tN2kMsg &N2kMsg) {
         }
       }
       break;
+
+#if 0
+    case 130577:
+        if (ParseN2kDirectionData(N2kMsg, dataMode, cogReference, sid, val1 /*cog*/, val2 /*sog*/,
+                                  heading, speedThroughWater, currentSet, currentDrift)) {
+            hdg = heading;
+        }
+        break;
+#endif
+
+    case 127250:
+        deviation = 0;
+        variation = 0;
+        if (ParseN2kHeading(N2kMsg, sid, heading, deviation, variation, ref)) {
+            if (ref == N2khr_magnetic) {
+                if (variation == N2kDoubleNA) {
+                    // If variation is unknown use variation for Boston, MA in 2025.
+                    variation = deg2Rad(-14.0);
+                }
+                if (deviation == N2kDoubleNA) {
+                    deviation = 0.0;
+                }
+                hdg = heading + deviation + variation;
+            }
+            else {
+                hdg = heading;
+            }
+        }
+        break;
 
     default:
       return;
