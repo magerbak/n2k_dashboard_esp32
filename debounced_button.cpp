@@ -1,5 +1,3 @@
-#include <Arduino.h>
-
 #include "debounced_button.h"
 
 DebouncedButton::DebouncedButton(int pin, int activeState) :

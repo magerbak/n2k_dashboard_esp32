@@ -21,7 +21,7 @@
 #include "NMEA2000.h"
 #define ESP32_CAN_TX_PIN GPIO_NUM_6
 #define ESP32_CAN_RX_PIN GPIO_NUM_5
-#include <NMEA2000_esp32.h> // Custom NMEA2000_esp32 support for S3
+#include <NMEA2000_esp32.h> // Custom NMEA2000_esp32 support for S3 (https://github.com/offspring/NMEA2000_esp32)
 #include <N2kMessages.h>
 
 #include "debounced_button.h"
@@ -38,17 +38,22 @@
 #define UPDATE_INTERVAL  1
 #define AIS_TIMEOUT      60
 
-#define HISTORY_SAMPLE_INTERVAL_MS 1000
+// Interval that min/max data is sampled.
+#define HISTORY_SAMPLE_INTERVAL_MS          1000
+// Interval over which sampled min/max data is aggregated per data point in history.
 #ifdef TESTING
-  #define HISTORY_AGGREGATION_INTERVAL_MS (10 * 1000)
+  #define HISTORY_AGGREGATION_INTERVAL_MS   (10 * 1000)
 #else
-  #define HISTORY_AGGREGATION_INTERVAL_MS (60 * 1000)
+  #define HISTORY_AGGREGATION_INTERVAL_MS   (60 * 1000)
 #endif
+// Default number of data points in history - can be customized in setup().
+// Total duration of history = num data points * HISTORY_AGGREGATION_INTERVAL_MS
+#define HISTORY_DEF_NUM_DATA_POINTS         60
 
-tNMEA2000 &NMEA2000=*(new tNMEA2000_esp32());
+tNMEA2000 &g_NMEA2000=*(new tNMEA2000_esp32());
 
 // Use dedicated hardware SPI pins
-Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+Adafruit_ST7789 g_tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 
 // Display page
 enum Page {
@@ -58,7 +63,7 @@ enum Page {
     PAGE_AIS_4NM,
     PAGE_AIS_1NM,
     NUM_PAGES
-} page = PAGE_WIND;
+} g_page = PAGE_WIND;
 
 enum Subpage {
     SUBPAGE_NONE,
@@ -70,7 +75,7 @@ enum Subpage {
     SUBPAGE_HIST_SEPARATOR,
 
     SUBPAGE_AIS_INFO,
-} subpage = SUBPAGE_NONE;
+} g_subpage = SUBPAGE_NONE;
 
 enum Event {
     EVT_NONE,
@@ -83,88 +88,134 @@ enum Event {
 };
 
 enum TextLayout {
-    TXT_RIGHT_JUSTIFIED,
+    TXT_JUSTIFIED,
     TXT_CENTERED,
 };
 
 struct HistWindowContext {
     uint16_t color;
+    // Position of top-left of history window.
     int16_t x;
     int16_t y;
+    // Width and height of history window.
     int16_t w;
     int16_t h;
 
-    unsigned int range_x;
-    unsigned int range_y;
+    unsigned int range_x;   // Range of x axis
+    unsigned int range_y;   // Range of y axis
 };
 
 struct HistStatsContext {
     bool bFirst = true;
-    size_t len = 0;
 
+    size_t len = 0;     // Num samples of history
+
+    // Stats for current history samples.
     double min = 0.0;
     double max = 1.0;
     double avg = 0.0;
 };
 
 
-double depth = 0.0; // ft
+bool g_bPosValid = false;
+N2kPos g_localPos;          // Latitude and Longitude
+N2kVector g_localVelocity;  // Boat COG (in radians) and SOG (kts) as a vector
+
+double g_depth = 0.0; // ft
+double g_hdg = 0.0;  // rads
+
 double awa = 0.0;  // rads
 double aws = 0.0;  // knots
 double cog = 0.0;  // rads
 double sog = 0.0;  // knots
-double hdg = 0.0;  // rads
-double latitude = std::numeric_limits<double>::quiet_NaN();  // degs
-double longitude = std::numeric_limits<double>::quiet_NaN(); // degs
 
 double twa = 0.0;  // rads
 double tws = 0.0;  // knots
 
-bool bPosValid = false;
-N2kVector localCog;
-N2kPos local_pos;
-std::list<N2kAISTarget *> targets;
-uint32_t sel_target = 0;
+// AIS state
+std::list<N2kAISTarget *> g_targets;
+uint32_t g_selTarget = 0;
 
-DebouncedButton buttonD0(0, LOW);
-DebouncedButton buttonD1(1);
-DebouncedButton buttonD2(2);
+DebouncedButton g_buttonD0(0, LOW);
+DebouncedButton g_buttonD1(1);
+DebouncedButton g_buttonD2(2);
 
-SimpleTimer updateTimer;
-SimpleTimer historyTimer;
+// 1s timer for refreshing data model (ageing out AIS targets, sampling data history).
+SimpleTimer g_updateTimer;
 
-DataHistory<double> awsHistory;
-DataHistory<double> twsHistory;
-DataHistory<double> sogHistory;
-DataHistory<double> depthHistory;
-//DataHistory<double> voltageHistory;
+// 60s timer interval for aggregating min/max history data.
+SimpleTimer g_historyTimer;
 
-uint16_t lastUpdate = 0;
+MinMaxDataHistory<double> g_awsHistory;
+MinMaxDataHistory<double> g_twsHistory;
+MinMaxDataHistory<double> g_sogHistory;
+MinMaxDataHistory<double> g_depthHistory;
+//MinMaxDataHistory<double> g_voltageHistory;
 
-static const char deg_str[] = { 0xf8, '\0' };
+// Time since last display update in millis.
+uint16_t g_lastUpdate = 0;
 
-void tftSplashScreen();
-void tftUpdate(bool bForce);
+// String just containing the degree symbol from the codepage 437 character set.
+static const char g_degStr[] = { 0xf8, '\0' };
+
+void handleButtonEvents(Event e);
+void handlePageButtonEvents(Event e);
+void handleSubpageButtonEvents(Event e);
+
+void displaySplashScreen();
+void tftPrintJustified(const char* str, int x, int y, TextLayout fmt);
+void tftPrintJustified(double val, int precision, const char* suffix, int x, int y, TextLayout fmt);
+
+void displayPageWind();
+void drawRadial(int x0,  int y0,  int r, int bearing, int len, uint16_t color);
+void statsHistoryCallback(void* user, const double* dataMin, const double* dataMax,
+                          size_t len, size_t offset);
+void drawHistoryCallback(void* user, const double* dataMin, const double* dataMax,
+                         size_t len, size_t offset);
+void displaySubpageHistory(const char* title, const MinMaxDataHistory<double>* hist, uint16_t color);
+
+void displayPagePosition();
+
+void displayPageAis(Page pg, time_t now);
+N2kAISTarget* getAISTarget(uint32_t mmsi);
+void setTarget(const N2kAISTarget* p);
 bool isVisibleTarget(const N2kAISTarget* t, Page pg);
+bool isDangerousTarget(double d, double t);
+void displaySubpageAisInfo();
 
-void HandleNMEA2000Msg(const tN2kMsg &N2kMsg);
+void displayUpdate(bool bForce);
+
+void handlePgn128267Msg(const tN2kMsg &N2kMsg);
+void handlePgn129025Msg(const tN2kMsg &N2kMsg);
+void handlePgn129026Msg(const tN2kMsg &N2kMsg);
+void handlePgn129038Msg(const tN2kMsg &N2kMsg);
+void handlePgn129039Msg(const tN2kMsg &N2kMsg);
+void handlePgn129794Msg(const tN2kMsg &N2kMsg);
+void handlePgn129809Msg(const tN2kMsg &N2kMsg);
+void handlePgn129810Msg(const tN2kMsg &N2kMsg);
+void handlePgn130306Msg(const tN2kMsg &N2kMsg);
+void handlePgn127250Msg(const tN2kMsg &N2kMsg);
+
+void handleNMEA2000Msg(const tN2kMsg &N2kMsg);
+
 
 void setup(void) {
   Serial.begin(115200);
   delay(1000);
   Serial.println(F("Starting N2K dashboard"));
-  buttonD0.begin();
-  buttonD1.begin();
-  buttonD2.begin();
 
-  updateTimer.begin(nullptr, HISTORY_SAMPLE_INTERVAL_MS, updateCallback);
-  historyTimer.begin(nullptr, HISTORY_AGGREGATION_INTERVAL_MS, historyCallback);
+  g_buttonD0.begin();
+  g_buttonD1.begin();
+  g_buttonD2.begin();
+
+  g_updateTimer.begin(nullptr, HISTORY_SAMPLE_INTERVAL_MS, updateCallback);
+  g_historyTimer.begin(nullptr, HISTORY_AGGREGATION_INTERVAL_MS, historyCallback);
 
   // Record history of AWS, TWS and SOG for last 60mins.
-  awsHistory.begin(60);
-  twsHistory.begin(60);
-  sogHistory.begin(60);
-  depthHistory.begin(60);
+  g_awsHistory.begin(60);
+  g_twsHistory.begin(60);
+  g_sogHistory.begin(60);
+  g_depthHistory.begin(60);
 
   // turn on backlite
   pinMode(TFT_BACKLITE, OUTPUT);
@@ -176,52 +227,218 @@ void setup(void) {
   delay(10);
 
   // initialize TFT
-  tft.init(DISPLAY_HEIGHT, DISPLAY_WIDTH); // Init ST7789 DISPLAY_WIDTHxDISPLAY_HEIGHT
-  tft.cp437(true);    // Use correct code page 437 indices
-  tft.setRotation(3);
-  tft.fillScreen(ST77XX_BLACK);
+  g_tft.init(DISPLAY_HEIGHT, DISPLAY_WIDTH);
+  g_tft.cp437(true);    // Use correct code page 437 indices
+  g_tft.setRotation(3);
 
-  tftSplashScreen();
+  displaySplashScreen();
   delay(1000);
   Serial.println(F("TFT Initialized"));
 
   //NMEA2000.SetN2kCANMsgBufSize(8);
   //NMEA2000.SetN2kCANReceiveFrameBufSize(100);
-  NMEA2000.EnableForward(false);                 // Disable all msg forwarding to USB (=Serial)
-  NMEA2000.SetMsgHandler(HandleNMEA2000Msg);
-  NMEA2000.Open();
+  g_NMEA2000.EnableForward(false);  // Disable all msg forwarding to USB (=Serial)
+  g_NMEA2000.SetMsgHandler(handleNMEA2000Msg);
+  g_NMEA2000.Open();
   Serial.println(F("N2k Initialized"));
 }
 
-void setTarget(const N2kAISTarget* p) {
-    if (p) {
-        //char buffer[128];
-        //p->toString(buffer,  sizeof(buffer));
-        //Serial.println(buffer);
+void loop() {
+    uint32_t t = millis();
 
-        sel_target = p->getMmsi();
+    // Drive our timers
+    g_updateTimer.tick(t);
+    g_historyTimer.tick(t);
+
+    // Poll buttons and drive UI
+    if (g_buttonD0.updateState()) {
+        handleButtonEvents(g_buttonD0.isPressed() ? EVT_D0_PRESS : EVT_D0_RELEASE);
+    }
+    if (g_buttonD1.updateState()) {
+        handleButtonEvents(g_buttonD1.isPressed() ? EVT_D1_PRESS : EVT_D1_RELEASE);
+    }
+    if (g_buttonD2.updateState()) {
+        handleButtonEvents(g_buttonD2.isPressed() ? EVT_D2_PRESS : EVT_D2_RELEASE);
+    }
+
+    // Handle incoming N2K messages.
+    g_NMEA2000.ParseMessages();
+}
+
+void handleButtonEvents(Event e) {
+    // A top level page is displayed when no subpage is active.
+    if (g_subpage == SUBPAGE_NONE) {
+        handlePageButtonEvents(e);
     }
     else {
-        //Serial.println("none");
-        sel_target = 0;
+        handleSubpageButtonEvents(e);
     }
 }
 
+// Handle button events according to which top level page is active.
+void handlePageButtonEvents(Event e) {
+    const N2kAISTarget* last = nullptr;
+    bool bNeedUpdate = false;
+    int p;
+
+    // For top-level pages, D2 advances to the next page.
+    if (e == EVT_D2_PRESS) {
+        p = (int)g_page + 1;
+        if (p == NUM_PAGES) {
+            p = 0;
+        }
+        g_page = (Page)p;
+        bNeedUpdate = true;
+    }
+    else {
+        switch (g_page) {
+            case PAGE_WIND:
+                switch (e) {
+                    case EVT_D1_PRESS:
+                        // Switch to first history subpage
+                        g_subpage = SUBPAGE_HIST_TWS;
+                        bNeedUpdate = true;
+                        break;
+
+                    default:
+                        break;
+                }
+                break;
+
+            case PAGE_AIS_12NM:
+            case PAGE_AIS_4NM:
+            case PAGE_AIS_1NM:
+                if (g_targets.size() > 0) {
+                    switch (e) {
+                        case EVT_D0_PRESS:
+                            // Cycle forward through targets
+                            for (auto t : g_targets) {
+                                if (!isVisibleTarget(t, g_page)) {
+                                    continue;
+                                }
+                                if (g_selTarget == 0 || (last && last->getMmsi() == g_selTarget)) {
+                                    // Select next target
+                                    setTarget(t);
+                                    bNeedUpdate = true;
+                                    goto done;
+                                }
+                                last = t;
+                            }
+                            // If no match (last target was selected), select none.
+                            setTarget(nullptr);
+                            break;
+
+                        case EVT_D1_PRESS:
+                            if (g_selTarget) {
+                                g_subpage = SUBPAGE_AIS_INFO;
+                                bNeedUpdate = true;
+                            }
+                            break;
+
+                        default:
+                            break;
+                    }
+                }
+                break;
+
+            default:
+                break;
+        }
+    }
+
+done:
+    if (bNeedUpdate) {
+        displayUpdate(true);
+    }
+}
+
+// Handle button events according to which subpage is active.
+void handleSubpageButtonEvents(Event e) {
+    const N2kAISTarget* last = nullptr;
+    bool bNeedUpdate = false;
+    int p;
+
+    // For all subpages, D1 exits back to parent top-level page.
+    if (e == EVT_D1_PRESS) {
+        g_subpage = SUBPAGE_NONE;
+        bNeedUpdate = true;
+    }
+    else {
+        switch (g_subpage) {
+            case SUBPAGE_HIST_TWS:
+            case SUBPAGE_HIST_AWS:
+            case SUBPAGE_HIST_SOG:
+            case SUBPAGE_HIST_DEPTH:
+                switch (e) {
+                    // Cycle through history subpages.
+                    case EVT_D0_PRESS:
+                        p = (int)g_subpage + 1;
+                        if (p == SUBPAGE_HIST_SEPARATOR) {
+                            p = SUBPAGE_HIST_TWS;
+                        }
+                        g_subpage = (Subpage)p;
+                        bNeedUpdate = true;
+                        break;
+
+                    default:
+                        break;
+                }
+                break;
+
+            case SUBPAGE_AIS_INFO:
+                switch (e) {
+                    // Show info for the next visible target on the parent AIS page.
+                    case EVT_D0_PRESS:
+                        for (auto t : g_targets) {
+                            if (!isVisibleTarget(t, g_page)) {
+                                continue;
+                            }
+                            if (g_selTarget == 0 || (last && last->getMmsi() == g_selTarget)) {
+                                // Select next target
+                                setTarget(t);
+                                bNeedUpdate = true;
+                                goto done;
+                            }
+                            last = t;
+                        }
+                        // If no match (last target was selected), select none.
+                        setTarget(nullptr);
+                        break;
+
+                    default:
+                        break;
+                }
+                break;
+
+
+            default:
+                break;
+        }
+    }
+
+done:
+    if (bNeedUpdate) {
+        displayUpdate(true);
+    }
+}
+
+// Time-based refresh of our data model. This may update the display based on
+// what changes.
 bool updateCallback(void* user) {
     bool bChanged = false;
     time_t now = time(nullptr);
-    time_t diff = now - lastUpdate;
+    time_t diff = now - g_lastUpdate;
 
     (void)user;
 
     // Age out stale AIS targets
-    for (auto t = targets.begin(); t != targets.end();) {
+    for (auto t = g_targets.begin(); t != g_targets.end();) {
         if ((*t)->getTimestamp() && now - (*t)->getTimestamp() > AIS_TIMEOUT) {
-            if ((*t)->getMmsi() == sel_target) {
-                sel_target = 0;
+            if ((*t)->getMmsi() == g_selTarget) {
+                setTarget(nullptr);
             }
             free(*t);
-            t = targets.erase(t);
+            t = g_targets.erase(t);
             bChanged = true;
         }
         else {
@@ -229,214 +446,55 @@ bool updateCallback(void* user) {
         }
     }
 
-    awsHistory.updateData(aws);
-    twsHistory.updateData(tws);
-    sogHistory.updateData(sog);
-    if (depth > 0.0) {
-        depthHistory.updateData(depth);
-    }
+    // Update the min/max value for current history data point.
+    g_awsHistory.updateData(aws);
+    g_twsHistory.updateData(tws);
+    g_sogHistory.updateData(sog);
+    g_depthHistory.updateData(g_depth);
 
     if (bChanged) {
-        tftUpdate(true);
+        displayUpdate(true);
     }
 
+    // Continue running
     return true;
 }
 
 bool historyCallback(void* user) {
-    awsHistory.updateHistory();
-    twsHistory.updateHistory();
-    sogHistory.updateHistory();
-    depthHistory.updateHistory();
+    // Record the next data point for each history.
+    g_awsHistory.updateHistory();
+    g_twsHistory.updateHistory();
+    g_sogHistory.updateHistory();
+    g_depthHistory.updateHistory();
 
+    // Continue running
     return true;
 }
 
-void handleButtonEvents(Event e) {
-    const N2kAISTarget* last = nullptr;
-    bool bNeedUpdate = false;
-    int p;
+void displaySplashScreen() {
+  g_tft.setTextWrap(false);
+  g_tft.fillScreen(ST77XX_BLACK);
+  g_tft.setCursor(0, 60);
 
-    if (subpage == SUBPAGE_NONE) {
-        // Handle event in a top level page
-
-        if (e == EVT_D2_PRESS) {
-            p = (int)page + 1;
-            if (p == NUM_PAGES) {
-                p = 0;
-            }
-            page = (Page)p;
-            bNeedUpdate = true;
-        }
-        else {
-            switch (page) {
-                case PAGE_WIND:
-                    switch (e) {
-                        case EVT_D1_PRESS:
-                            subpage = SUBPAGE_HIST_TWS;
-                            bNeedUpdate = true;
-                            break;
-
-                        default:
-                            break;
-                    }
-                    break;
-
-                case PAGE_AIS_12NM:
-                case PAGE_AIS_4NM:
-                case PAGE_AIS_1NM:
-                    if (targets.size() > 0) {
-                        switch (e) {
-                            case EVT_D0_PRESS:
-                                // Cycle forward through targets
-                                for (auto t : targets) {
-                                    if (!isVisibleTarget(t, page)) {
-                                        continue;
-                                    }
-                                    if (sel_target == 0 || (last && last->getMmsi() == sel_target)) {
-                                        // Select next target
-                                        setTarget(t);
-                                        bNeedUpdate = true;
-                                        goto done;
-                                    }
-                                    last = t;
-                                }
-                                // If no match (last target was selected), select none.
-                                setTarget(nullptr);
-                                break;
-
-                            case EVT_D1_PRESS:
-                                if (sel_target) {
-                                    subpage = SUBPAGE_AIS_INFO;
-                                    bNeedUpdate = true;
-                                }
-                                break;
-
-                            default:
-                                break;
-                        }
-                    }
-                    break;
-
-                default:
-                    break;
-            }
-        }
-    }
-    else {
-        if (e == EVT_D1_PRESS) {
-            subpage = SUBPAGE_NONE;
-            bNeedUpdate = true;
-        } else {
-            switch (subpage) {
-                case SUBPAGE_HIST_TWS:
-                case SUBPAGE_HIST_AWS:
-                case SUBPAGE_HIST_SOG:
-                case SUBPAGE_HIST_DEPTH:
-                    switch (e) {
-                        case EVT_D0_PRESS:
-                            p = (int)subpage + 1;
-                            if (p == SUBPAGE_HIST_SEPARATOR) {
-                                p = SUBPAGE_HIST_TWS;
-                            }
-                            subpage = (Subpage)p;
-                            bNeedUpdate = true;
-                            break;
-
-                        case EVT_D1_PRESS:
-                            subpage = SUBPAGE_NONE;
-                            bNeedUpdate = true;
-                            break;
-
-                        default:
-                            break;
-                    }
-                    break;
-
-                case SUBPAGE_AIS_INFO:
-                    // Cycle forward through targets
-                    for (auto t : targets) {
-                        if (!isVisibleTarget(t, page)) {
-                            continue;
-                        }
-                        if (sel_target == 0 || (last && last->getMmsi() == sel_target)) {
-                            // Select next target
-                            setTarget(t);
-                            bNeedUpdate = true;
-                            goto done;
-                        }
-                        last = t;
-                    }
-                    // If no match (last target was selected), select none.
-                    setTarget(nullptr);
-                    break;
-
-
-                default:
-                    break;
-            }
-        }
-    }
-
-done:
-    if (bNeedUpdate) {
-        tftUpdate(true);
-    }
+  g_tft.setTextColor(ST77XX_GREEN);
+  g_tft.setTextSize(3);
+  g_tft.println("Hello Michael");
 }
 
-void loop() {
-    uint32_t t = millis();
-
-    updateTimer.tick(t);
-    historyTimer.tick(t);
-
-    if (buttonD0.updateState()) {
-        handleButtonEvents(buttonD0.isPressed() ? EVT_D0_PRESS : EVT_D0_RELEASE);
-    }
-    if (buttonD1.updateState()) {
-        handleButtonEvents(buttonD1.isPressed() ? EVT_D1_PRESS : EVT_D1_RELEASE);
-    }
-    if (buttonD2.updateState()) {
-        handleButtonEvents(buttonD2.isPressed() ? EVT_D2_PRESS : EVT_D2_RELEASE);
-    }
-
-    NMEA2000.ParseMessages();
-}
-
-bool formatLatLong(char* buf, size_t len, double val, char posSuffix, char negSuffix)
-{
-    double absVal = fabs(val);
-    double degs = floor(absVal);
-    double mins = (absVal - degs) * 60.0;
-
-    int rc = snprintf(buf, len, "%.0f%c %.3f %c", degs, (char)0xf8, mins,
-                      val >= 0 ? posSuffix : negSuffix);
-    if (rc < 0 || rc == (int)len) {
-        // Truncation or error
-        return false;
-    }
-    return true;
-}
-
-void tftSplashScreen() {
-  tft.setTextWrap(false);
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setCursor(0, 60);
-
-  tft.setTextColor(ST77XX_GREEN);
-  tft.setTextSize(3);
-  tft.println("Hello Michael");
-}
-
+// Helper function to print text using a calculated starting position based on
+// its length and a layout option.
 void tftPrintJustified(const char* str, int x, int y, TextLayout fmt) {
     int16_t minx;
     int16_t miny;
     uint16_t w;
     uint16_t h;
 
-    tft.getTextBounds(str, 0, 0, &minx, &miny, &w, &h);
+    g_tft.getTextBounds(str, 0, 0, &minx, &miny, &w, &h);
     switch (fmt) {
-        case TXT_RIGHT_JUSTIFIED:
+        // x and y are either 0 or the rightmost/bottommost extent of the justified
+        // text respectively. This allows text to be placed flush with the edge of
+        // the display in all 4 corners.
+        case TXT_JUSTIFIED:
             if (x) {
                 x -= w + 1;
             }
@@ -446,13 +504,16 @@ void tftPrintJustified(const char* str, int x, int y, TextLayout fmt) {
             break;
 
         case TXT_CENTERED:
+            // Note y is not adjusted, to allow manual vertical placement.
             x -= (w + 1) / 2;
             break;
     }
-    tft.setCursor(x, y);
-    tft.print(str);
+    g_tft.setCursor(x, y);
+    g_tft.print(str);
 }
 
+// Helper function to print a floating point value using a calculated starting
+// position based on its displayed length and a layout option.
 void tftPrintJustified(double val, int precision, const char* suffix, int x, int y, TextLayout fmt) {
     char str[64];
 
@@ -465,86 +526,121 @@ void tftPrintJustified(double val, int precision, const char* suffix, int x, int
 }
 
 
-void tftPagePosition() {
-    char buffer[128];
+//
+// Wind info top-level page.
+//
+// D1 switches to history subpages.
+// D2 cycles to next top-level page.
+void displayPageWind() {
+    struct HistWindowContext hist_window;
 
-    tft.setTextWrap(false);
-    tft.fillScreen(ST77XX_BLACK);
-    tft.setCursor(0, 0);
+    int x0 = DISPLAY_WIDTH / 2;
+    int y0 = DISPLAY_HEIGHT / 2;
 
-    tft.setTextColor(ST77XX_YELLOW);
-    tft.setTextSize(3);
+    g_tft.setTextWrap(false);
+    g_tft.fillScreen(ST77XX_BLACK);
 
-    buffer[0] = '\0';
-    if (!std::isnan(latitude)) {
-        formatLatLong(buffer, sizeof(buffer), latitude, 'N', 'S');
+    // TWS history top right
+    hist_window.color = ST77XX_BLUE;
+    hist_window.x = DISPLAY_WIDTH - g_twsHistory.getLength();
+    hist_window.y = 30;
+    hist_window.w = 60;
+    hist_window.h = 30;
+    hist_window.range_x = g_twsHistory.getSize();
+    hist_window.range_y = hist_window.h;
+    g_twsHistory.forEachData(drawHistoryCallback, &hist_window);
+
+    // AWS history bottom right
+    hist_window.color = ST77XX_RED;
+    hist_window.x = DISPLAY_WIDTH - g_twsHistory.getLength();
+    hist_window.y = 70;
+    hist_window.w = 60;
+    hist_window.h = 30;
+    hist_window.range_x = g_awsHistory.getSize();
+    hist_window.range_y = hist_window.h;
+    g_awsHistory.forEachData(drawHistoryCallback, &hist_window);
+
+    g_tft.startWrite();
+    // Draw port quadrants in red
+    g_tft.drawCircleHelper(x0, y0, 60, 0x1, ST77XX_RED);
+    g_tft.drawCircleHelper(x0, y0, 60, 0x8, ST77XX_RED);
+    g_tft.drawCircleHelper(x0, y0, 59, 0x1, ST77XX_RED);
+    g_tft.drawCircleHelper(x0, y0, 59, 0x8, ST77XX_RED);
+    // Draw starboard quadrants in green
+    g_tft.drawCircleHelper(x0, y0, 60, 0x2, ST77XX_GREEN);
+    g_tft.drawCircleHelper(x0, y0, 60, 0x4, ST77XX_GREEN);
+    g_tft.drawCircleHelper(x0, y0, 59, 0x2, ST77XX_GREEN);
+    g_tft.drawCircleHelper(x0, y0, 59, 0x4, ST77XX_GREEN);
+    g_tft.endWrite();
+
+    for (int d = 0; d < 360; d += 10) {
+        drawRadial(x0,  y0,  58,  d,  2,  ST77XX_WHITE);
     }
-    tft.println(buffer);
-
-    buffer[0] = '\0';
-    if (!std::isnan(longitude)) {
-        formatLatLong(buffer, sizeof(buffer), longitude, 'E', 'W');
+    for (int d = 0; d < 360; d += 30) {
+        drawRadial(x0,  y0,  58,  d,  6,  ST77XX_WHITE);
     }
-    tft.println(buffer);
 
-    tft.setCursor(0, 55);
-    tft.setTextSize(2);
+    drawRadial(x0, y0, 50, rad2Deg(awa), 20, ST77XX_WHITE);
 
-    buffer[0] = '\0';
-    if (!std::isnan(hdg)) {
-        snprintf(buffer, sizeof(buffer), "HDG %.0f%c",
-                 rad2Deg(hdg), (char)0xf8);
-    }
-    tft.println(buffer);
+    // True wind angle and speed at top
+    g_tft.setTextColor(ST77XX_BLUE);
+    g_tft.setTextSize(3);
+    g_tft.setCursor(0, 0);
+    g_tft.print(rad2Deg(twa), 0);
+    g_tft.println((char)0xf8);
+    g_tft.setTextSize(1);
+    g_tft.print("TWA");
 
-    buffer[0] = '\0';
-    if (!std::isnan(cog)) {
-        snprintf(buffer, sizeof(buffer), "COG %.0f%c %.1fkts",
-                 rad2Deg(cog), (char)0xf8, sog);
-    }
-    tft.println(buffer);
+    g_tft.setTextSize(3);
+    tftPrintJustified(tws, 1, nullptr, DISPLAY_WIDTH, 0, TXT_JUSTIFIED);
 
-    double twd = hdg + twa;
-    tft.setTextColor(ST77XX_BLUE);
-    buffer[0] = '\0';
-    if (!std::isnan(awa)) {
-        snprintf(buffer, sizeof(buffer), "TWD %.0f%c %.0fkts",
-                 rad2Deg(twd), (char)0xf8, tws);
-    }
-    tft.println(buffer);
+    // Apparent wind angle and speed at bottom
+    g_tft.setTextColor(ST77XX_RED);
+    g_tft.setTextSize(1);
+    g_tft.setCursor(0, 102);
+    g_tft.print("AWA");
+    g_tft.setTextSize(3);
+    g_tft.setCursor(0, 112);
+    g_tft.print(rad2Deg(awa), 0);
+    g_tft.print((char)0xf8);
 
-    tft.setTextColor(ST77XX_RED);
-    buffer[0] = '\0';
-    if (!std::isnan(awa)) {
-        snprintf(buffer, sizeof(buffer), "AWA %.0f%c %.0fkts",
-                 rad2Deg(awa), (char)0xf8, aws);
-    }
-    tft.println(buffer);
+    g_tft.setTextSize(3);
+    tftPrintJustified(aws, 1, nullptr, DISPLAY_WIDTH, DISPLAY_HEIGHT, TXT_JUSTIFIED);
 
-    tft.setTextColor(ST77XX_GREEN);
-    buffer[0] = '\0';
-    if (!std::isnan(depth)) {
-        snprintf(buffer, sizeof(buffer), "Depth %.1fft", depth);
-    }
-    tft.println(buffer);
+    // Local SOG and COG in center of dial
+    g_tft.setTextColor(ST77XX_YELLOW);
+    g_tft.setTextSize(2);
+    tftPrintJustified(sog, 1, nullptr, x0, y0 - 15, TXT_CENTERED);
+    tftPrintJustified(rad2Deg(cog), 0, g_degStr, x0, y0 + 5, TXT_CENTERED);
+
+    // Depth to left of dial
+    g_tft.setTextColor(ST77XX_GREEN);
+    g_tft.setCursor(0, 60);
+    g_tft.println(g_depth, 1);
+    g_tft.setTextSize(1);
+    g_tft.print("ft");
 }
 
+// Helper function to draw a partial radial of a circle of radius r at x0, y0.
+// Radial extends for len pixels towards center of circle.
 void drawRadial(int x0,  int y0,  int r, int bearing, int len, uint16_t color) {
     double ax = sin(deg2Rad(bearing));
     double ay = -cos(deg2Rad(bearing));
 
-    tft.drawLine(x0 + round(ax * r), y0 + round(ay * r),
-                 x0 + round(ax * (r - len)), y0 + round(ay * (r - len)), color);
+    g_tft.drawLine(x0 + round(ax * r), y0 + round(ay * r),
+                   x0 + round(ax * (r - len)), y0 + round(ay * (r - len)), color);
 }
 
+// Callback to calculate statistics of history data.
 void statsHistoryCallback(void* user, const double* dataMin, const double* dataMax,
                           size_t len, size_t offset) {
-    HistStatsContext* ctx = (HistStatsContext*) user;
+    HistStatsContext* ctx = (HistStatsContext *)user;
 
     for (unsigned int i = 0; i < len; i++) {
         if (ctx->bFirst) {
             // Don't allow max to be less than 1.0 to avoid divide by zero and
-            // other scaling issues.
+            // other scaling issues. This presumes that we're not interested in
+            // zooming in on negative or very small data values.
             ctx->max = dataMax[i] < 1.0 ? 1.0 : dataMax[i];
             ctx->min = dataMin[i];
         }
@@ -566,9 +662,12 @@ void statsHistoryCallback(void* user, const double* dataMin, const double* dataM
     }
 }
 
+// Callback to draw history data scaled to the display window defined in the
+// context structure. Note that if data points exceed range_x (in number) or
+// range_y (in value) then drawing will exceed the defined window.
 void drawHistoryCallback(void* user, const double* dataMin, const double* dataMax,
                          size_t len, size_t offset) {
-    HistWindowContext* ctx = (HistWindowContext*)user;
+    HistWindowContext* ctx = (HistWindowContext *)user;
 
     double scale_x = ctx->w / ctx->range_x;
     double scale_y = ctx->h / ctx->range_y;
@@ -577,144 +676,63 @@ void drawHistoryCallback(void* user, const double* dataMin, const double* dataMa
         int16_t dmax = round(dataMax[i] * scale_y);
         int16_t dmin = round(dataMin[i] * scale_y);
 
-        tft.drawFastVLine(ctx->x + round((offset + i) * scale_x),
-                          ctx->y + ctx->h - dmax,
-                          dmax - dmin + 1, ctx->color);
+        g_tft.drawFastVLine(ctx->x + round((offset + i) * scale_x),
+                            ctx->y + ctx->h - dmax,
+                            dmax - dmin + 1, ctx->color);
     }
 }
 
-void tftPageWind() {
-    struct HistWindowContext hist_window;
 
-    int x0 = DISPLAY_WIDTH / 2;
-    int y0 = DISPLAY_HEIGHT / 2;
-
-    tft.setTextWrap(false);
-    tft.fillScreen(ST77XX_BLACK);
-
-    // TWS history top right
-    hist_window.color = ST77XX_BLUE;
-    hist_window.x = DISPLAY_WIDTH - twsHistory.getLength();
-    hist_window.y = 30;
-    hist_window.w = 60;
-    hist_window.h = 30;
-    hist_window.range_x = twsHistory.getSize();
-    hist_window.range_y = hist_window.h;
-    twsHistory.forEachData(drawHistoryCallback, &hist_window);
-
-    // AWS history bottom right
-    hist_window.color = ST77XX_RED;
-    hist_window.x = DISPLAY_WIDTH - twsHistory.getLength();
-    hist_window.y = 70;
-    hist_window.w = 60;
-    hist_window.h = 30;
-    hist_window.range_x = awsHistory.getSize();
-    hist_window.range_y = hist_window.h;
-    awsHistory.forEachData(drawHistoryCallback, &hist_window);
-
-    tft.startWrite();
-    // Draw port quadrants in red
-    tft.drawCircleHelper(x0, y0, 60, 0x1, ST77XX_RED);
-    tft.drawCircleHelper(x0, y0, 60, 0x8, ST77XX_RED);
-    tft.drawCircleHelper(x0, y0, 59, 0x1, ST77XX_RED);
-    tft.drawCircleHelper(x0, y0, 59, 0x8, ST77XX_RED);
-    // Draw starboard quadrants in green
-    tft.drawCircleHelper(x0, y0, 60, 0x2, ST77XX_GREEN);
-    tft.drawCircleHelper(x0, y0, 60, 0x4, ST77XX_GREEN);
-    tft.drawCircleHelper(x0, y0, 59, 0x2, ST77XX_GREEN);
-    tft.drawCircleHelper(x0, y0, 59, 0x4, ST77XX_GREEN);
-    tft.endWrite();
-
-    for (int d = 0; d < 360; d += 10) {
-        drawRadial(x0,  y0,  58,  d,  2,  ST77XX_WHITE);
-    }
-    for (int d = 0; d < 360; d += 30) {
-        drawRadial(x0,  y0,  58,  d,  6,  ST77XX_WHITE);
-    }
-
-    drawRadial(x0, y0, 50, rad2Deg(awa), 20, ST77XX_WHITE);
-
-    // True wind angle and speed at top
-    tft.setTextColor(ST77XX_BLUE);
-    tft.setTextSize(3);
-    tft.setCursor(0, 0);
-    tft.print(rad2Deg(twa), 0);
-    tft.println((char)0xf8);
-    tft.setTextSize(1);
-    tft.print("TWA");
-
-    tft.setTextSize(3);
-    tftPrintJustified(tws, 1, nullptr, DISPLAY_WIDTH, 0, TXT_RIGHT_JUSTIFIED);
-
-    // Apparent wind angle and speed at bottom
-    tft.setTextColor(ST77XX_RED);
-    tft.setTextSize(1);
-    tft.setCursor(0, 102);
-    tft.print("AWA");
-    tft.setTextSize(3);
-    tft.setCursor(0, 112);
-    tft.print(rad2Deg(awa), 0);
-    tft.print((char)0xf8);
-
-    tft.setTextSize(3);
-    tftPrintJustified(aws, 1, nullptr, DISPLAY_WIDTH, DISPLAY_HEIGHT, TXT_RIGHT_JUSTIFIED);
-
-    // Local SOG and COG in center of dial
-    tft.setTextColor(ST77XX_YELLOW);
-    tft.setTextSize(2);
-    tftPrintJustified(sog, 1, nullptr, x0, y0 - 15, TXT_CENTERED);
-    tftPrintJustified(rad2Deg(cog), 0, deg_str, x0, y0 + 5, TXT_CENTERED);
-
-    // Depth to left of dial
-    tft.setTextColor(ST77XX_GREEN);
-    tft.setCursor(0, 60);
-    tft.println(depth, 1);
-    tft.setTextSize(1);
-    tft.print("ft");
-}
-
-void tftSubpageHistory(const char* title, const DataHistory<double>* hist, uint16_t color) {
+//
+// Wind subpage to display data history detail.
+//
+// D0 to cycle through each history subpage.
+// D1 to exit back to top level AIS page.
+void displaySubpageHistory(const char* title, const MinMaxDataHistory<double>* hist, uint16_t color) {
     struct HistStatsContext hist_stats;
     struct HistWindowContext hist_window;
 
-    tft.setTextWrap(false);
-    tft.fillScreen(ST77XX_BLACK);
+    g_tft.setTextWrap(false);
+    g_tft.fillScreen(ST77XX_BLACK);
 
+    // Calculate history statistics.
     hist_stats.len = hist->getLength();
     hist->forEachData(statsHistoryCallback, &hist_stats);
 
-    // Vertical scale
+    // Vertical scale: a series of horizontal lines every 10 units.
     int t = ((int)hist_stats.max / 10) * 10;
     while (t > 0) {
-        tft.drawFastHLine(0, DISPLAY_HEIGHT - 3 - round(t * (DISPLAY_HEIGHT - 3) / hist_stats.max),
+        g_tft.drawFastHLine(0, DISPLAY_HEIGHT - 3 - round(t * (DISPLAY_HEIGHT - 3) / hist_stats.max),
                           DISPLAY_WIDTH, ST77XX_WHITE);
         t -= 10;
     }
 
-    // Horizontal scale
-    tft.drawFastHLine(0, DISPLAY_HEIGHT - 3, DISPLAY_WIDTH, ST77XX_WHITE);
+    // Horizontal scale: a series of ticks every 10 units.
+    g_tft.drawFastHLine(0, DISPLAY_HEIGHT - 3, DISPLAY_WIDTH, ST77XX_WHITE);
     for (t = 0; t < hist->getSize(); t += 10) {
-        tft.drawFastVLine(DISPLAY_WIDTH - round(t * DISPLAY_WIDTH / hist->getSize()),
+        g_tft.drawFastVLine(DISPLAY_WIDTH - round(t * DISPLAY_WIDTH / hist->getSize()),
                           DISPLAY_HEIGHT - 2, 2, ST77XX_WHITE);
     }
 
-    // Title
-    tft.setTextColor(color);
-    tft.setTextSize(3);
-    tft.setCursor(0, 0);
-    tft.print(title);
+    // Title at top-left
+    g_tft.setTextColor(color);
+    g_tft.setTextSize(3);
+    g_tft.setCursor(0, 0);
+    g_tft.print(title);
 
-    tft.setTextSize(2);
-    tft.setCursor(0, 81);
-    tft.print("Max ");
-    tft.println(hist_stats.max, 0);
+    // Stats at bottom-left
+    g_tft.setTextSize(2);
+    g_tft.setCursor(0, DISPLAY_HEIGHT - 54);
+    g_tft.print("Max ");
+    g_tft.println(hist_stats.max, 0);
 
-    tft.print("Avg ");
-    tft.println(hist_stats.avg, 0);
+    g_tft.print("Avg ");
+    g_tft.println(hist_stats.avg, 0);
 
-    tft.print("Min ");
-    tft.println(hist_stats.min, 0);
+    g_tft.print("Min ");
+    g_tft.println(hist_stats.min, 0);
 
+    // Draw history data
     double scale_x = DISPLAY_WIDTH / hist->getSize();
     hist_window.color = color;
     hist_window.x = DISPLAY_WIDTH - round(hist->getLength() * scale_x);
@@ -727,7 +745,212 @@ void tftSubpageHistory(const char* title, const DataHistory<double>* hist, uint1
     hist->forEachData(drawHistoryCallback, &hist_window);
 }
 
+//
+// Position info top-level page.
+//
+// This page is intended to provide essential textyak info for making
+// logbook entries.
+//
+void displayPagePosition() {
+    char buffer[128];
 
+    g_tft.setTextWrap(false);
+    g_tft.fillScreen(ST77XX_BLACK);
+    g_tft.setCursor(0, 0);
+
+    // Local boat info in yellow
+    g_tft.setTextColor(ST77XX_YELLOW);
+    g_tft.setTextSize(3);
+
+    // Position first in large font.
+    if (g_bPosValid) {
+        buffer[0] = '\0';
+        g_localPos.toString(buffer, sizeof(buffer), N2kPos::FMT_LAT_ONLY);
+        g_tft.println(buffer);
+        buffer[0] = '\0';
+        g_localPos.toString(buffer, sizeof(buffer), N2kPos::FMT_LON_ONLY);
+        g_tft.println(buffer);
+    }
+
+    g_tft.setCursor(0, 55);
+    g_tft.setTextSize(2);
+
+    // Heading
+    buffer[0] = '\0';
+    snprintf(buffer, sizeof(buffer), "HDG %.0f%s",
+             rad2Deg(g_hdg), g_degStr);
+    g_tft.println(buffer);
+
+    // COG and SOG
+    buffer[0] = '\0';
+    snprintf(buffer, sizeof(buffer), "COG %.0f%s %.1fkts",
+             rad2Deg(g_localVelocity.getBearing()), g_degStr,
+             g_localVelocity.getMagnitude());
+    g_tft.println(buffer);
+
+    // True wind direction and speed in blue
+    g_tft.setTextColor(ST77XX_BLUE);
+    double twd = g_hdg + twa;
+    buffer[0] = '\0';
+    snprintf(buffer, sizeof(buffer), "TWD %.0f%s %.0fkts",
+             rad2Deg(twd), g_degStr, tws);
+    g_tft.println(buffer);
+
+    // Apparent wind angle and speed in red
+    g_tft.setTextColor(ST77XX_RED);
+    buffer[0] = '\0';
+    snprintf(buffer, sizeof(buffer), "AWA %.0f%s %.0fkts",
+             rad2Deg(awa), g_degStr, aws);
+    g_tft.println(buffer);
+
+    // Depth in green
+    g_tft.setTextColor(ST77XX_GREEN);
+    buffer[0] = '\0';
+    snprintf(buffer, sizeof(buffer), "Depth %.1fft", g_depth);
+    g_tft.println(buffer);
+}
+
+//
+// AIS top-level page.
+//
+// North-up plot of AIS targets at various ranges defined by page ID.
+// Vectors for each target show projected position in 5min.
+// Dangerous targets are displayed in red.
+//
+// D0 to cycle through targets displaying vessel name, range and bearing in
+// bottom left. CPA distance and time (mins) is shown in top-right if vessel is
+// approaching our position.
+//
+// D1 to switch to details AIS info subpage for the selected target.
+//
+// D2 cycles to next top-level page.
+void displayPageAis(Page pg, time_t now) {
+    const double radius = DISPLAY_HEIGHT / 2.0 - 7.0;
+    double range = pg == PAGE_AIS_12NM ? 12.0 : pg == PAGE_AIS_4NM ? 4.0 : 1.0;
+    double range_scale = radius / range;
+    double vector_scale = range_scale / 12.0;;
+    int x0 = DISPLAY_WIDTH / 2;
+    int y0 = DISPLAY_HEIGHT / 2;
+
+    g_tft.setTextWrap(false);
+    g_tft.fillScreen(ST77XX_BLACK);
+
+    // Draw range circles. Possibly we should have fewer.
+    g_tft.drawCircle(x0, y0, round(range * range_scale), ST77XX_WHITE);
+    g_tft.drawCircle(x0, y0, round(range * 0.75 * range_scale), ST77XX_WHITE);
+    g_tft.drawCircle(x0, y0, round(range * 0.5 * range_scale), ST77XX_WHITE);
+    g_tft.drawCircle(x0, y0, round(range * 0.25 * range_scale), ST77XX_WHITE);
+
+    // Display page max range top-left.
+    g_tft.setTextColor(ST77XX_WHITE);
+    g_tft.setTextSize(2);
+    g_tft.setCursor(0, 0);
+    g_tft.print(range, 0);
+    g_tft.print("nm");
+
+    // Local COG vector at center.
+    g_tft.drawLine(x0, y0, x0 + round(g_localVelocity.getX() * vector_scale),
+                 y0 - round(g_localVelocity.getY() * vector_scale), ST77XX_YELLOW);
+
+    // Skip targets until we have local position
+    if (g_bPosValid) {
+        const N2kAISTarget* target = nullptr;
+
+        for (auto t : g_targets) {
+            if (!isVisibleTarget(t, g_page)) {
+                continue;
+            }
+
+            // Keep a pointer to the selected target and handle it later. We
+            // draw it last so it's on top and stays visible.
+            if (t->getMmsi() == g_selTarget) {
+                target = t;
+                continue;
+            }
+
+            const N2kVector &p = t->getRelDistance();
+            const N2kVector &v = t->getVelocity();
+            double cpad = t->getCpa()->getDistance();
+            double cpat = t->getCpa()->getRelTime(now) / 60;
+            bool bDangerous = isDangerousTarget(cpad, cpat);
+
+            g_tft.fillCircle(x0 + round(p.getX() * range_scale),
+                           y0 - round(p.getY() * range_scale),
+                           3, bDangerous ? ST77XX_RED : ST77XX_GREEN);
+            g_tft.drawLine(x0 + round(p.getX() * range_scale),
+                         y0 - round(p.getY() * range_scale),
+                         x0 + round(p.getX() * range_scale + v.getX() * vector_scale),
+                         y0 - round(p.getY() * range_scale + v.getY() * vector_scale),
+                         ST77XX_YELLOW);
+
+        }
+        if (target) {
+            double cpad = target->getCpa()->getDistance();
+            double cpab = target->getCpa()->getBearing();
+            double cpat = target->getCpa()->getRelTime(now) / 60;
+            const N2kVector &p = target->getRelDistance();
+            const N2kVector &v = target->getVelocity();
+
+            // Draw vessel info bottom-left
+            g_tft.setTextColor(ST77XX_GREEN);
+            g_tft.setCursor(0, DISPLAY_HEIGHT - 47);
+            g_tft.print(p.getMagnitude(), 2);
+            g_tft.println("nm");
+            g_tft.print(p.getBearing(), 0);
+            g_tft.println(g_degStr);
+            g_tft.print(target->getName());
+
+            // Draw CPA info top-right
+            if (cpat >= 0.0 && !std::isnan(cpad)) {
+                g_tft.setTextColor(ST77XX_RED);
+                tftPrintJustified(cpad, 2, "nm", DISPLAY_WIDTH, 0, TXT_JUSTIFIED);
+                tftPrintJustified(cpab, 0, g_degStr, DISPLAY_WIDTH, 32, TXT_JUSTIFIED);
+                tftPrintJustified(cpat, 1, "m", DISPLAY_WIDTH, 48, TXT_JUSTIFIED);
+            }
+
+            // Draw selected vessel in white
+            g_tft.fillCircle(x0 + round(p.getX()* range_scale),
+                           y0 - round(p.getY()* range_scale),
+                           3, ST77XX_WHITE);
+            g_tft.drawLine(x0 + round(p.getX()* range_scale),
+                         y0 - round(p.getY()* range_scale),
+                         x0 + round(p.getX()* range_scale + v.getX()* vector_scale),
+                         y0 - round(p.getY()* range_scale + v.getY()* vector_scale),
+                         ST77XX_YELLOW);
+        }
+    }
+}
+
+// Fetch the existing N2kAISTarget object for the specified MMSI, or allocate a
+// new object.
+N2kAISTarget* getAISTarget(uint32_t mmsi) {
+    for (auto t : g_targets) {
+        if (t->getMmsi() == mmsi) {
+            return t;
+        }
+    }
+
+    N2kAISTarget* t = new N2kAISTarget(mmsi);
+    g_targets.push_back(t);
+    return t;
+}
+
+// Set which AIS target is currently selected.
+void setTarget(const N2kAISTarget* p) {
+    if (p) {
+        //char buffer[128];
+        //p->toString(buffer,  sizeof(buffer));
+        //Serial.println(buffer);
+
+        g_selTarget = p->getMmsi();
+    }
+    else {
+        //Serial.println("none");
+        g_selTarget = 0;
+    }
+}
+
+// Is the AIS target visible on the current AIS page?
 bool isVisibleTarget(const N2kAISTarget* t, Page pg) {
     double range = pg == PAGE_AIS_12NM ? 12.0 : pg == PAGE_AIS_4NM ? 4.0 : 1.0;
 
@@ -743,449 +966,418 @@ bool isVisibleTarget(const N2kAISTarget* t, Page pg) {
     return true;
 }
 
+// Should the AIS target's closest point of approach (CPA) be considered dangerous?
 bool isDangerousTarget(double d, double t) {
     if (!std::isnan(d) && !std::isnan(t)) {
-        return d < 1.0 && t > 0 && t < 60;
+        // Yes, if under 1nm within the next 60mins.
+        return d<1.0 &&t> 0 && t < 60;
     }
     return false;
 }
 
 
-// AIS plot at various ranges defined by page ID.
-// Vectors show projected position in 5min
-void tftPageAis(Page pg, time_t now) {
-    const double radius = 60.0;
-    double range = pg == PAGE_AIS_12NM ? 12.0 : pg == PAGE_AIS_4NM ? 4.0 : 1.0;
-    double range_scale = radius / range;
-    double vector_scale = range_scale / 12.0;;
-    int x0 = DISPLAY_WIDTH / 2;
-    int y0 = DISPLAY_HEIGHT / 2;
-
-    tft.setTextWrap(false);
-    tft.fillScreen(ST77XX_BLACK);
-
-    tft.drawCircle(x0, y0, round(range * range_scale), ST77XX_WHITE);
-    tft.drawCircle(x0, y0, round(range * 0.75 * range_scale), ST77XX_WHITE);
-    tft.drawCircle(x0, y0, round(range * 0.5 * range_scale), ST77XX_WHITE);
-    tft.drawCircle(x0, y0, round(range * 0.25 * range_scale), ST77XX_WHITE);
-
-    tft.setTextColor(ST77XX_WHITE);
-    tft.setTextSize(2);
-    tft.setCursor(0, 0);
-    tft.print(range, 0);
-    tft.print("nm");
-
-    // Local COG vector
-    tft.drawLine(x0, y0, x0 + round(localCog.getX() * vector_scale),
-                 y0 - round(localCog.getY() * vector_scale), ST77XX_YELLOW);
-
-    // Skip rest until we have local position
-    if (bPosValid) {
-        const N2kAISTarget* target = nullptr;
-
-        for (auto t : targets) {
-            if (!isVisibleTarget(t, page)) {
-                continue;
-            }
-
-            if (t->getMmsi() == sel_target) {
-                target = t;
-            }
-
-            const N2kVector &p = t->getRelDistance();
-            const N2kVector &v = t->getVelocity();
-            double cpad = t->getCpa()->getDistance();
-            double cpat = t->getCpa()->getRelTime(now) / 60;
-            bool bDangerous = isDangerousTarget(cpad, cpat);
-
-            tft.fillCircle(x0 + round(p.getX() * range_scale),
-                           y0 - round(p.getY() * range_scale),
-                           3, bDangerous ? ST77XX_RED : ST77XX_GREEN);
-            tft.drawLine(x0 + round(p.getX() * range_scale),
-                         y0 - round(p.getY() * range_scale),
-                         x0 + round(p.getX() * range_scale + v.getX() * vector_scale),
-                         y0 - round(p.getY() * range_scale + v.getY() * vector_scale),
-                         ST77XX_YELLOW);
-
-        }
-        if (target) {
-            double cpad = target->getCpa()->getDistance();
-            double cpab = target->getCpa()->getBearing();
-            double cpat = target->getCpa()->getRelTime(now) / 60;
-            const N2kVector &p = target->getRelDistance();
-            const N2kVector &v = target->getVelocity();
-
-            tft.setTextColor(ST77XX_GREEN);
-            tft.setCursor(0, 88);
-            tft.print(p.getMagnitude(), 2);
-            tft.println("nm");
-            tft.print(p.getBearing(), 0);
-            tft.println((char)0xf8);
-            tft.print(target->getName());
-
-            if (cpat >= 0.0 && !std::isnan(cpad)) {
-                tft.setTextColor(ST77XX_RED);
-                tftPrintJustified(cpad, 2, "nm", DISPLAY_WIDTH,  0, TXT_RIGHT_JUSTIFIED);
-                tftPrintJustified(cpab, 0, deg_str, DISPLAY_WIDTH,  32, TXT_RIGHT_JUSTIFIED);
-                tftPrintJustified(cpat, 1, "m", DISPLAY_WIDTH,  48, TXT_RIGHT_JUSTIFIED);
-            }
-
-            tft.fillCircle(x0 + round(p.getX()* range_scale),
-                           y0 - round(p.getY()* range_scale),
-                           3, ST77XX_WHITE);
-            tft.drawLine(x0 + round(p.getX()* range_scale),
-                         y0 - round(p.getY()* range_scale),
-                         x0 + round(p.getX()* range_scale + v.getX()* vector_scale),
-                         y0 - round(p.getY()* range_scale + v.getY()* vector_scale),
-                         ST77XX_YELLOW);
-        }
-    }
-
-}
-
-void tftSubpageAisInfo() {
+//
+// AIS subpage to display detailed vessel info.
+//
+// D0 to cycle selected vessel.
+// D1 to exit back to top level AIS page.
+void displaySubpageAisInfo() {
     char buffer[128];
 
-    tft.setTextWrap(false);
-    tft.fillScreen(ST77XX_BLACK);
+    g_tft.setTextWrap(false);
+    g_tft.fillScreen(ST77XX_BLACK);
 
-    if (bPosValid) {
-        for (auto t : targets) {
-            if (!isVisibleTarget(t, page)) {
+    if (g_bPosValid) {
+        for (auto t : g_targets) {
+            if (!isVisibleTarget(t, g_page)) {
                 continue;
             }
 
-            if (t->getMmsi() == sel_target) {
+            if (t->getMmsi() == g_selTarget) {
                 static const int txtSize = 13;
-                tft.setTextColor(ST77XX_GREEN);
-                tft.setTextSize(2);
+                g_tft.setTextColor(ST77XX_GREEN);
+                g_tft.setTextSize(2);
 
-                tft.setCursor(0, 0);
-                tft.println(t->getName());
-                tft.print("MMSI ");
-                tft.println(t->getMmsi());
-                tft.println("");
+                g_tft.setCursor(0, 0);
+                g_tft.println(t->getName());
+                g_tft.print("MMSI ");
+                g_tft.println(t->getMmsi());
+                g_tft.println("");
 
                 const N2kVector& relPos = t->getRelDistance();
-                tft.print("Rng ");
-                tft.print(relPos.getMagnitude(), 2);
-                tft.print("nm ");
-                tft.print("Brg ");
-                tft.print(relPos.getBearing(), 0);
-                tft.println((char)0xf8);
+                g_tft.print("Rng ");
+                g_tft.print(relPos.getMagnitude(), 2);
+                g_tft.print("nm ");
+                g_tft.print("Brg ");
+                g_tft.print(relPos.getBearing(), 0);
+                g_tft.println((char)0xf8);
 
                 const N2kVector& v = t->getVelocity();
-                tft.print("SOG ");
-                tft.print(v.getMagnitude(), 1);
-                tft.print("kts ");
-                tft.print("COG ");
-                tft.print(v.getBearing(), 0);
-                tft.println((char)0xf8);
+                g_tft.print("SOG ");
+                g_tft.print(v.getMagnitude(), 1);
+                g_tft.print("kts ");
+                g_tft.print("COG ");
+                g_tft.print(v.getBearing(), 0);
+                g_tft.println((char)0xf8);
 
-                tft.print("LOA ");
-                tft.print(t->getLength(), 1);
-                tft.print("ft ");
-                tft.print("Bm ");
-                tft.print(t->getBeam(), 1);
-                tft.println("ft ");
+                g_tft.print("LOA ");
+                g_tft.print(t->getLength(), 1);
+                g_tft.print("ft ");
+                g_tft.print("Bm ");
+                g_tft.print(t->getBeam(), 1);
+                g_tft.println("ft ");
 
-                tft.print("Dft ");
-                tft.print(t->getDraft(), 1);
-                tft.println("ft ");
+                g_tft.print("Dft ");
+                g_tft.print(t->getDraft(), 1);
+                g_tft.println("ft ");
             }
         }
     }
 }
 
 
-void tftUpdate(bool bForce) {
-
-  // Age out old AIS entries.
-    time_t now = time(nullptr);
-    time_t diff = now - lastUpdate;
-
-  if (bForce || diff >= UPDATE_INTERVAL) {
-      switch (subpage) {
-          case SUBPAGE_NONE:
-              switch (page) {
-                  case PAGE_POSITION:
-                      tftPagePosition();
-                      break;
-
-                  case PAGE_WIND:
-                      tftPageWind();
-                      break;
-
-                  case PAGE_AIS_12NM:
-                  case PAGE_AIS_4NM:
-                  case PAGE_AIS_1NM:
-                      tftPageAis(page, now);
-                      break;
-              }
-              break;
-
-          case SUBPAGE_HIST_TWS:
-              tftSubpageHistory("TWS", &twsHistory, ST77XX_BLUE);
-              break;
-
-          case SUBPAGE_HIST_AWS:
-              tftSubpageHistory("AWS", &awsHistory, ST77XX_RED);
-              break;
-
-          case SUBPAGE_HIST_SOG:
-              tftSubpageHistory("SOG", &sogHistory, ST77XX_YELLOW);
-              break;
-
-          case SUBPAGE_HIST_DEPTH:
-              tftSubpageHistory("Depth", &depthHistory, ST77XX_GREEN);
-              break;
-
-          case SUBPAGE_AIS_INFO:
-              tftSubpageAisInfo();
-              break;
-      }
-
-    lastUpdate = now;
-  }
-}
-
-N2kAISTarget* getAISTarget(uint32_t mmsi) {
-    for (auto t : targets) {
-        if (t->getMmsi() == mmsi) {
-            return t;
-        }
-    }
-
-    N2kAISTarget* t = new N2kAISTarget(mmsi);
-    targets.push_back(t);
-    return t;
-}
-
-// Converts a bearing of 0...2PI into +-PI
-double getSignedBearing(double bearing)
-{
-    return bearing > M_PI ? (bearing - 2 * M_PI) : bearing;
-}
-
-
+// Redraw the display.
 //
-// Src  22, Dst 255, PGN 130306: AWS 12.2kts, AWA -31
-// Src  22, Dst 255, PGN 129025: Position 36°51.054'S 174°45.870'W
-// Src  22, Dst 255, PGN 129029: GNSS Position 60°26.197'N 22°14.269'E, DateTime 2018-01-24 12:13:20.000Z
-// Src  22, Dst 255, PGN 128267: Water Depth 33.8ft (10.3m)
-// Src  22, Dst 255, PGN 129026: COG 116T, Speed 0.2kts
+// This gets called any time a new message is received that updates our data model.
+// To avoid excessive calls and the resulting flicker, we avoid updating the
+// display if it has been recently redrawn unless the caller forces a redraw.
+void displayUpdate(bool bForce) {
 
-void HandleNMEA2000Msg(const tN2kMsg &N2kMsg) {
-  unsigned char sid = 0;
-  double val1, val2;
-  tN2kHeadingReference ref;
-  tN2kWindReference ref2;
-  uint8_t mid;
-  tN2kAISRepeat rep;
-  uint32_t mmsi;
-  uint32_t mothership;
-  uint32_t imo;
-  char callsign[10];
-  char name[32];
-  char vendor[32];
-  uint8_t vesselType;
-  double length;
-  double beam;
-  double draft;
-  double posStbd;
-  double posBow;
-  uint16_t etaDate;
-  double etaTime;
-  char dest[32];
-  tN2kAISVersion aisVer;
-  tN2kGNSStype gnssType;
-  tN2kAISDTE dte;
-  bool accuracy;
-  bool raim;
-  uint8_t seconds;
-  double aisCog;
-  double aisSog;
-  double aisHdg;
-  double aisRot;
-  tN2kAISNavStatus status;
-  tN2kAISUnit unit;
-  bool display;
-  bool dsc;
-  bool band;
-  bool msg22;
-  tN2kAISMode mode;
-  bool state;
+    time_t now = time(nullptr);
+    time_t diff = now - g_lastUpdate;
 
-  double heading;
-  double deviation;
-  double variation;
-#if 0
-  tN2kDataMode dataMode;
-  tN2kHeadingReference cogReference;
-  double speedThroughWater;
-  double currentSet;
-  double currentDrift;
-#endif
+    if (bForce || diff >= UPDATE_INTERVAL) {
+        // Active page is defined by g_page and g_subpage
+        switch (g_subpage) {
+            case SUBPAGE_NONE:
+                switch (g_page) {
+                    case PAGE_POSITION:
+                        displayPagePosition();
+                        break;
 
-  switch (N2kMsg.PGN) {
-    // Handle various PGNs here
-    case 128267:
-      if (ParseN2kWaterDepth(N2kMsg, sid, val1, val2)) {
-          depth = meters2Ft(val1 + val2);
-      }
-      break;
-      
-    case 129025:
-      if (ParseN2kPositionRapid(N2kMsg, val1, val2)) {
-        latitude = val1;
-        longitude = val2;
-        local_pos.set(val1, val2);
+                    case PAGE_WIND:
+                        displayPageWind();
+                        break;
 
-        bool bIsFirstPos = !bPosValid;
-        bPosValid = true;
+                    case PAGE_AIS_12NM:
+                    case PAGE_AIS_4NM:
+                    case PAGE_AIS_1NM:
+                        displayPageAis(g_page, now);
+                        break;
+                }
+                break;
 
+            case SUBPAGE_HIST_TWS:
+                displaySubpageHistory("TWS", &g_twsHistory, ST77XX_BLUE);
+                break;
+
+            case SUBPAGE_HIST_AWS:
+                displaySubpageHistory("AWS", &g_awsHistory, ST77XX_RED);
+                break;
+
+            case SUBPAGE_HIST_SOG:
+                displaySubpageHistory("SOG", &g_sogHistory, ST77XX_YELLOW);
+                break;
+
+            case SUBPAGE_HIST_DEPTH:
+                displaySubpageHistory("Depth", &g_depthHistory, ST77XX_GREEN);
+                break;
+
+            case SUBPAGE_AIS_INFO:
+                displaySubpageAisInfo();
+                break;
+        }
+
+        g_lastUpdate = now;
+    }
+}
+
+// PGN 128267: Water Depth 33.8ft (10.3m)
+void handlePgn128267Msg(const tN2kMsg &N2kMsg) {
+    unsigned char sid = 0;
+    double val1, val2;
+
+    if (ParseN2kWaterDepth(N2kMsg, sid, val1, val2)) {
+        g_depth = meters2Ft(val1 + val2);
+    }
+}
+
+// PGN 129025: Position 36°51.054'S 174°45.870'W
+void handlePgn129025Msg(const tN2kMsg &N2kMsg) {
+    double val1, val2;
+
+    if (ParseN2kPositionRapid(N2kMsg, val1, val2)) {
+        g_localPos.set(val1, val2);
+
+        bool bIsFirstPos = !g_bPosValid;
+        g_bPosValid = true;
+
+        // If this is the first time we've received our position, update the CPA
+        // of all AIS targets.
         if (bIsFirstPos) {
-            for (auto t : targets) {
+            for (auto t : g_targets) {
                 if (t->getTimestamp() != 0) {
-                    t->calcCpa(local_pos, localCog);
+                    t->calcCpa(g_localPos, g_localVelocity);
                 }
             }
         }
-      }
+    }
+}
+
+// PGN 129026: COG 116T, Speed 0.2kts
+void handlePgn129026Msg(const tN2kMsg &N2kMsg) {
+    unsigned char sid = 0;
+    double val1, val2;
+    tN2kHeadingReference ref;
+
+    if (ParseN2kCOGSOGRapid(N2kMsg, sid, ref, val1, val2)) {
+        if (ref == 0 && !std::isnan(val1) && !std::isnan(val2)) {
+            cog = val1;
+            sog = metersPerSec2Kts(val2);
+            g_localVelocity.set(metersPerSec2Kts(val2), rad2Deg(val1));
+        }
+    }
+}
+
+// PGN 129038: AIS Class A Position MMSI 367513040, 42°21.699'N 71°2.490'W, COG 151T, Speed 8.9kts
+void handlePgn129038Msg(const tN2kMsg &N2kMsg) {
+    uint8_t mid;
+    tN2kAISRepeat rep;
+    uint32_t mmsi;
+    double latitude;
+    double longitude;
+    bool accuracy;
+    bool raim;
+    uint8_t seconds;
+    double aisCog;
+    double aisSog;
+    double aisHdg;
+    double aisRot;
+    tN2kAISNavStatus status;
+
+    if (ParseN2kAISClassAPosition(N2kMsg, mid, rep, mmsi, latitude, longitude,
+                                  accuracy, raim, seconds,
+                                  aisCog, aisSog, aisHdg, aisRot, status)) {
+        N2kAISTarget* target = getAISTarget(mmsi);
+
+        N2kPos p(latitude, longitude);
+        N2kVector v(metersPerSec2Kts(aisSog), rad2Deg(aisCog));
+        target->update(p, v);
+
+        if (g_bPosValid) {
+            target->calcCpa(g_localPos, g_localVelocity);
+        }
+    }
+}
+
+// PGN 129039: AIS Class B Position MMSI 367739760, 42°20.441'N 71°0.612'W, COG 133T, Speed 8.1kts
+void handlePgn129039Msg(const tN2kMsg &N2kMsg) {
+    uint8_t mid;
+    tN2kAISRepeat rep;
+    uint32_t mmsi;
+    double latitude;
+    double longitude;
+    bool accuracy;
+    bool raim;
+    uint8_t seconds;
+    double aisCog;
+    double aisSog;
+    double aisHdg;
+    tN2kAISUnit unit;
+    bool display;
+    bool dsc;
+    bool band;
+    bool msg22;
+    tN2kAISMode mode;
+    bool state;
+
+    if (ParseN2kAISClassBPosition(N2kMsg, mid, rep, mmsi, latitude, longitude,
+                                  accuracy, raim, seconds,
+                                  aisCog, aisSog, aisHdg,
+                                  unit, display, dsc, band, msg22, mode, state)) {
+        N2kAISTarget* target = getAISTarget(mmsi);
+
+        N2kPos p(latitude, longitude);
+        N2kVector v(metersPerSec2Kts(aisSog), rad2Deg(aisCog));
+        target->update(p, v);
+
+        if (g_bPosValid) {
+            target->calcCpa(g_localPos, g_localVelocity);
+        }
+    }
+}
+
+// PGN 129794: AIS Class A Static Info MMSI 367513030, Name INDEPENDENCE, Callsign WDG2186, Type 52, Length 39.0ft, Beam 13.0ft, Draft 6.1ft, Dest BOSTON
+void handlePgn129794Msg(const tN2kMsg &N2kMsg) {
+    uint8_t mid;
+    tN2kAISRepeat rep;
+    uint32_t mmsi;
+    uint32_t imo;
+    char callsign[10];
+    char name[32];
+    uint8_t vesselType;
+    double length;
+    double beam;
+    double draft;
+    double posStbd;
+    double posBow;
+    uint16_t etaDate;
+    double etaTime;
+    char dest[32];
+    tN2kAISVersion aisVer;
+    tN2kGNSStype gnssType;
+    tN2kAISDTE dte;
+
+    if (ParseN2kAISClassAStatic(N2kMsg, mid, rep, mmsi, imo,
+                                callsign, sizeof(callsign),
+                                name, sizeof(name),
+                                vesselType, length, beam,
+                                posStbd, posBow, etaDate, etaTime, draft,
+                                dest, sizeof(dest), aisVer, gnssType,
+                                dte)) {
+        N2kAISTarget* target = getAISTarget(mmsi);
+
+        target->update(vesselType, length, beam, draft,
+                       callsign, name, dest);
+    }
+}
+
+// PGN 129809: AIS Class B Static Info1 MMSI 338444184, Name MENHADEN
+void handlePgn129809Msg(const tN2kMsg &N2kMsg) {
+    uint8_t mid;
+    tN2kAISRepeat rep;
+    uint32_t mmsi;
+    char name[32];
+
+    if (ParseN2kAISClassBStaticPartA(N2kMsg, mid, rep, mmsi, name, sizeof(name))) {
+        N2kAISTarget* target = getAISTarget(mmsi);
+        target->update(name);
+    }
+}
+
+// PGN 129810: AIS Class B Static Info2 MMSI 368310310, Type 37, Callsign , Length 20.0ft, Beam 7.0ft
+void handlePgn129810Msg(const tN2kMsg &N2kMsg) {
+    uint8_t mid;
+    tN2kAISRepeat rep;
+    uint32_t mmsi;
+    uint8_t vesselType;
+    char vendor[32];
+    char callsign[10];
+    double length;
+    double beam;
+    double posStbd;
+    double posBow;
+    uint32_t mothership;
+
+    if (ParseN2kAISClassBStaticPartB(N2kMsg, mid, rep, mmsi, vesselType,
+                                     vendor, sizeof(vendor), callsign, sizeof(callsign),
+                                     length, beam, posStbd, posBow, mothership)) {
+        N2kAISTarget* target = getAISTarget(mmsi);
+
+        target->update(vesselType, length,
+                       beam, 0,
+                       callsign, nullptr, nullptr);
+    }
+}
+
+// PGN 130306: AWS 12.2kts, AWA -31
+void handlePgn130306Msg(const tN2kMsg &N2kMsg) {
+    unsigned char sid = 0;
+    double val1, val2;
+    tN2kWindReference ref2;
+
+    if (ParseN2kWindSpeed(N2kMsg, sid, val1, val2, ref2)) {
+        if (ref2 == N2kWind_Apparent && !std::isnan(val1) && !std::isnan(val2)) {
+
+            aws = metersPerSec2Kts(val1);
+            awa = getSignedBearing(val2);
+
+            // Calculate true wind
+            N2kVector aw(aws, val2);
+            N2kVector boat(sog, 0);
+
+            N2kVector tw;
+            tw.setXY(aw.getX() - boat.getX(), aw.getY() - boat.getY());
+            tws = tw.getMagnitude();
+            twa = getSignedBearing(tw.getBearing());
+        }
+    }
+}
+
+// PGN 127250: HDG 43, Deviation ?, Variation ?, magnetic.
+void handlePgn127250Msg(const tN2kMsg &N2kMsg) {
+    unsigned char sid = 0;
+    double heading = 0.0;
+    double deviation = 0.0;
+    double variation = 0.0;
+    tN2kHeadingReference ref;
+
+    if (ParseN2kHeading(N2kMsg, sid, heading, deviation, variation, ref)) {
+        if (ref == N2khr_magnetic) {
+            if (variation == N2kDoubleNA) {
+                // If variation is unknown use variation for Boston, MA in 2025.
+                variation = deg2Rad(-14.0);
+            }
+            if (deviation == N2kDoubleNA) {
+                deviation = 0.0;
+            }
+            g_hdg = heading + deviation + variation;
+        }
+        else {
+            g_hdg = heading;
+        }
+    }
+}
+
+// Process incoming N2K messages to update our data model.
+void handleNMEA2000Msg(const tN2kMsg &N2kMsg) {
+
+  switch (N2kMsg.PGN) {
+    // Handle PGNs we are interested in
+    case 127250:
+        handlePgn127250Msg(N2kMsg);
+        break;
+
+    case 128267:
+        handlePgn128267Msg(N2kMsg);
+        break;
+      
+    case 129025:
+        handlePgn129025Msg(N2kMsg);
       break;
 
     case 129026:
-      if (ParseN2kCOGSOGRapid(N2kMsg, sid, ref, val1, val2)) {
-        if (ref == 0 && !std::isnan(val1) && !std::isnan(val2)) {
-          cog = val1;
-          sog = metersPerSec2Kts(val2);
-          localCog.set(metersPerSec2Kts(val2), rad2Deg(val1));
-        }
-      }
+        handlePgn129026Msg(N2kMsg);
       break;
       
-    //case 129029:
-    //  break;
-
     case 129038:
-        if (ParseN2kAISClassAPosition(N2kMsg, mid, rep, mmsi, latitude, longitude,
-                                      accuracy, raim, seconds,
-                                      aisCog, aisSog, aisHdg, aisRot, status)) {
-            N2kAISTarget* target = getAISTarget(mmsi);
-
-            N2kPos p(latitude, longitude);
-            N2kVector v(metersPerSec2Kts(aisSog), rad2Deg(aisCog));
-            target->update(p, v);
-
-            if (bPosValid) {
-                target->calcCpa(local_pos, localCog);
-            }
-        }
+        handlePgn129038Msg(N2kMsg);
         break;
 
     case 129039:
-        if (ParseN2kAISClassBPosition(N2kMsg, mid, rep, mmsi, latitude, longitude,
-                                      accuracy, raim, seconds,
-                                      aisCog, aisSog, aisHdg,
-                                      unit, display, dsc, band, msg22, mode, state)) {
-              N2kAISTarget* target = getAISTarget(mmsi);
-
-              N2kPos p(latitude, longitude);
-              N2kVector v(metersPerSec2Kts(aisSog), rad2Deg(aisCog));
-              target->update(p, v);
-
-              if (bPosValid) {
-                  target->calcCpa(local_pos, localCog);
-              }
-          }
-          break;
+        handlePgn129039Msg(N2kMsg);
+        break;
 
     case 129794:
-        if (ParseN2kAISClassAStatic(N2kMsg, mid, rep, mmsi, imo,
-                                    callsign, sizeof(callsign),
-                                    name, sizeof(name),
-                                    vesselType, length, beam,
-                                    posStbd, posBow, etaDate, etaTime, draft,
-                                    dest, sizeof(dest), aisVer, gnssType,
-                                    dte)) {
-            N2kAISTarget* target = getAISTarget(mmsi);
-
-            target->update(vesselType, length, beam, draft,
-                           callsign, name, dest);
-        }
+        handlePgn129794Msg(N2kMsg);
         break;
 
     case 129809:
-        if (ParseN2kAISClassBStaticPartA(N2kMsg, mid, rep, mmsi, name, sizeof(name))) {
-            N2kAISTarget* target = getAISTarget(mmsi);
-            target->update(name);
-        }
+        handlePgn129809Msg(N2kMsg);
         break;
 
     case 129810:
-        if (ParseN2kAISClassBStaticPartB(N2kMsg, mid, rep, mmsi, vesselType,
-                                         vendor, sizeof(vendor), callsign, sizeof(callsign),
-                                         length, beam, posStbd, posBow, mothership)) {
-            N2kAISTarget* target = getAISTarget(mmsi);
-
-            target->update(vesselType, length,
-                           beam, 0,
-                           callsign, nullptr, nullptr);
-
-        }
+        handlePgn129810Msg(N2kMsg);
         break;
 
     case 130306:
-      if (ParseN2kWindSpeed(N2kMsg, sid, val1, val2, ref2)) {
-        if (ref2 == N2kWind_Apparent && !std::isnan(val1) && !std::isnan(val2)) {
-
-          aws = metersPerSec2Kts(val1);
-          awa = getSignedBearing(val2);
-
-          // Calculate true wind
-          N2kVector aw(aws, val2);
-          N2kVector boat(sog, 0);
-
-          N2kVector tw;
-          tw.setXY(aw.getX() - boat.getX(), aw.getY() - boat.getY());
-          tws = tw.getMagnitude();
-          twa = getSignedBearing(tw.getBearing());
-        }
-      }
-      break;
-
-#if 0
-    case 130577:
-        if (ParseN2kDirectionData(N2kMsg, dataMode, cogReference, sid, val1 /*cog*/, val2 /*sog*/,
-                                  heading, speedThroughWater, currentSet, currentDrift)) {
-            hdg = heading;
-        }
-        break;
-#endif
-
-    case 127250:
-        deviation = 0;
-        variation = 0;
-        if (ParseN2kHeading(N2kMsg, sid, heading, deviation, variation, ref)) {
-            if (ref == N2khr_magnetic) {
-                if (variation == N2kDoubleNA) {
-                    // If variation is unknown use variation for Boston, MA in 2025.
-                    variation = deg2Rad(-14.0);
-                }
-                if (deviation == N2kDoubleNA) {
-                    deviation = 0.0;
-                }
-                hdg = heading + deviation + variation;
-            }
-            else {
-                hdg = heading;
-            }
-        }
+        handlePgn130306Msg(N2kMsg);
         break;
 
     default:
-      return;
+        // Not interested. Do nothing.
+        return;
   }
 
-  tftUpdate(false);
+  displayUpdate(false);
 }

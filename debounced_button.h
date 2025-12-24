@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <Arduino.h>
 
 class DebouncedButton
 {
@@ -8,18 +9,18 @@ public:
 
     void begin();
 
-    // Updates button state and returns whether indicated state change occured.
+    // Update button state. Returns true if state changed.
+    bool updateState();
+    // Query the current button state.
+    bool isPressed() const { return m_buttonValue == m_activeState; }
+
+    // Update button state and return whether indicated state change occured
+    // since last update.
     bool wasPressed();
     bool wasReleased();
 
-    // Lower level methods to independently update button state and query the new state.
-    bool updateState();
-    bool isPressed() const { return m_buttonValue == m_activeState; }
-
 private:
     static const uint16_t DEBOUNCE_INTERVAL_MS = 50;
-
-
 
     int m_pin = 0;
     int m_activeState = HIGH;

@@ -1,14 +1,21 @@
 #pragma once
 
+// Stores a rolling history of minimum and maximum data.
+//
+// Min/max data is updated every time updateData is called.
+// History is advanced each time updateHistory is called.
+// History data is retrieved by passing a callback to forEachData. Callback will
+//   be called once or twice (after buffer has wrapped) with a range of data (oldest
+//   to newest). Final call will be when offset + len == getLength()
 template <typename T>
-class DataHistory
+class MinMaxDataHistory
 {
 public:
     // Passes min and max data of length len starting from offset in the history.
     typedef void (*Callback)(void* user, const T* dataMin, const T* dataMax, size_t len, size_t offset);
 
-    DataHistory() = default;
-    ~DataHistory()
+    MinMaxDataHistory() = default;
+    ~MinMaxDataHistory()
     {
         if (m_dataMin) {
             delete [] m_dataMin;

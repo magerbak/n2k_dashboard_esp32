@@ -65,7 +65,7 @@ const N2kPos N2kPos::getAdjPosition(const N2kVector &Adj) const
     return N2kPos(Lat, Lon);
 }
 
-bool N2kPos::toString(char* buf, size_t maxlen) const
+bool N2kPos::toString(char* buf, size_t maxlen, FormatOption fmt) const
 {
     double absLat = fabs(m_lat);
     double degsLat = floor(absLat);
@@ -73,11 +73,28 @@ bool N2kPos::toString(char* buf, size_t maxlen) const
     double absLon = fabs(m_lon);
     double degsLon = floor(absLon);
     double minsLon = (absLon - degsLon) * 60.0;
+    int rc = 0;
 
-    int rc = snprintf(buf, maxlen,
+    switch (fmt) {
+    case FMT_LAT_ONLY:
+        rc = snprintf(buf, maxlen,
+                      "%.0f°%.3f'%c",
+                      degsLat, minsLat, m_lat >= 0 ? 'N' : 'S');
+        break;
+
+    case FMT_LON_ONLY:
+        rc = snprintf(buf, maxlen,
+                      "%03.0f°%.3f'%c",
+                      degsLon, minsLon, m_lon >= 0 ? 'E' : 'W');
+        break;
+
+    case FMT_LAT_AND_LON:
+        rc = snprintf(buf, maxlen,
                       "%.0f°%.3f'%c %03.0f°%.3f'%c",
                       degsLat, minsLat, m_lat >= 0 ? 'N' : 'S',
                       degsLon, minsLon, m_lon >= 0 ? 'E' : 'W');
+        break;
+    }
 
     if (rc < 0 || rc == (int)maxlen) {
         // Truncation or error
