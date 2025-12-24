@@ -22,7 +22,12 @@ public:
     // over large distances or close to poles).
     const N2kVector getRelDistance(const N2kPos &Ref) const;
 
-    bool toString(char* buf, size_t maxlen) const;
+    enum FormatOption {
+        FMT_LAT_ONLY,
+        FMT_LON_ONLY,
+        FMT_LAT_AND_LON,
+    };
+    bool toString(char* buf, size_t maxlen, FormatOption = FMT_LAT_AND_LON) const;
 
 private:
     double m_lat = 0.0;
