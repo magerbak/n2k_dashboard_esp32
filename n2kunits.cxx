@@ -18,9 +18,16 @@ double deg2Rad(double deg)
     return deg * (M_PI / 180.0);
 }
 
-// Converts a bearing of 0...2PI into +-PI
-double getSignedBearing(double bearing) {
-    return bearing > M_PI ? (bearing - 2 * M_PI) : bearing;
+// Converts a bearing of 0...360 into +-180
+double getSignedBearing(double bearing)
+{
+    return bearing > 180.0 ? (bearing - 360.0) : bearing;
+}
+
+// Normalizes bearing between 0...360.
+double normalizeBearing(double bearing)
+{
+    return bearing - (trunc(bearing / 360.0) * 360.0);
 }
 
 double fixedFrac2Double(uint16_t x, double precision)
