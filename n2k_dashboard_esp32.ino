@@ -32,9 +32,6 @@
 #include "n2kunits.h"
 #include "n2kaistarget.h"
 
-#define DISPLAY_WIDTH   240
-#define DISPLAY_HEIGHT  135
-
 #define UPDATE_INTERVAL  1
 #define AIS_TIMEOUT      60
 
@@ -51,6 +48,9 @@
 #define HISTORY_DEF_NUM_DATA_POINTS         60
 
 tNMEA2000 &g_NMEA2000=*(new tNMEA2000_esp32());
+
+#define DISPLAY_WIDTH   240
+#define DISPLAY_HEIGHT  135
 
 // Use dedicated hardware SPI pins
 Adafruit_ST7789 g_tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
@@ -119,23 +119,18 @@ struct HistStatsContext {
 
 bool g_bPosValid = false;
 N2kPos g_localPos;          // Latitude and Longitude
-N2kVector g_localVelocity;  // Boat COG (in radians) and SOG (kts) as a vector
+N2kVector g_localVelocity;  // Boat COG (in degrees) and SOG (kts) as a vector
+double g_hdg = 0.0;         // degrees
 
-double g_depth = 0.0; // ft
-double g_hdg = 0.0;  // rads
-
-double awa = 0.0;  // rads
-double aws = 0.0;  // knots
-double cog = 0.0;  // rads
-double sog = 0.0;  // knots
-
-double twa = 0.0;  // rads
-double tws = 0.0;  // knots
+double g_depth = 0.0;       // ft
+N2kVector g_appWind;        // Degrees, knots
+N2kVector g_trueWind;       // Degrees, knots
 
 // AIS state
 std::list<N2kAISTarget *> g_targets;
-uint32_t g_selTarget = 0;
+uint32_t g_selTarget = 0;   // MMSI of selected AIS target
 
+// UI buttons. On the Adafruit ESP32-S3 reverse TFT feather, these are on pins 0, 1 and 2.
 DebouncedButton g_buttonD0(0, LOW);
 DebouncedButton g_buttonD1(1);
 DebouncedButton g_buttonD2(2);
@@ -143,7 +138,7 @@ DebouncedButton g_buttonD2(2);
 // 1s timer for refreshing data model (ageing out AIS targets, sampling data history).
 SimpleTimer g_updateTimer;
 
-// 60s timer interval for aggregating min/max history data.
+// 60s timer interval for recording aggregate min/max history data.
 SimpleTimer g_historyTimer;
 
 MinMaxDataHistory<double> g_awsHistory;
@@ -163,8 +158,8 @@ void handlePageButtonEvents(Event e);
 void handleSubpageButtonEvents(Event e);
 
 void displaySplashScreen();
-void tftPrintJustified(const char* str, int x, int y, TextLayout fmt);
-void tftPrintJustified(double val, int precision, const char* suffix, int x, int y, TextLayout fmt);
+void drawJustifiedText(const char* str, int x, int y, TextLayout fmt);
+void drawJustifiedVal(double val, int precision, const char* suffix, int x, int y, TextLayout fmt);
 
 void displayPageWind();
 void drawRadial(int x0,  int y0,  int r, int bearing, int len, uint16_t color);
@@ -447,9 +442,9 @@ bool updateCallback(void* user) {
     }
 
     // Update the min/max value for current history data point.
-    g_awsHistory.updateData(aws);
-    g_twsHistory.updateData(tws);
-    g_sogHistory.updateData(sog);
+    g_awsHistory.updateData(g_appWind.getMagnitude());
+    g_twsHistory.updateData(g_trueWind.getMagnitude());
+    g_sogHistory.updateData(g_localVelocity.getMagnitude());
     g_depthHistory.updateData(g_depth);
 
     if (bChanged) {
@@ -483,7 +478,7 @@ void displaySplashScreen() {
 
 // Helper function to print text using a calculated starting position based on
 // its length and a layout option.
-void tftPrintJustified(const char* str, int x, int y, TextLayout fmt) {
+void drawJustifiedText(const char* str, int x, int y, TextLayout fmt) {
     int16_t minx;
     int16_t miny;
     uint16_t w;
@@ -514,7 +509,7 @@ void tftPrintJustified(const char* str, int x, int y, TextLayout fmt) {
 
 // Helper function to print a floating point value using a calculated starting
 // position based on its displayed length and a layout option.
-void tftPrintJustified(double val, int precision, const char* suffix, int x, int y, TextLayout fmt) {
+void drawJustifiedVal(double val, int precision, const char* suffix, int x, int y, TextLayout fmt) {
     char str[64];
 
     if (!suffix) {
@@ -522,7 +517,7 @@ void tftPrintJustified(double val, int precision, const char* suffix, int x, int
     }
 
     int rc = snprintf(str, sizeof(str), "%.*f%s", precision, val, suffix);
-    tftPrintJustified(str, x, y, fmt);
+    drawJustifiedText(str, x, y, fmt);
 }
 
 
@@ -580,19 +575,19 @@ void displayPageWind() {
         drawRadial(x0,  y0,  58,  d,  6,  ST77XX_WHITE);
     }
 
-    drawRadial(x0, y0, 50, rad2Deg(awa), 20, ST77XX_WHITE);
+    drawRadial(x0, y0, 50, g_appWind.getBearing(), 20, ST77XX_WHITE);
 
     // True wind angle and speed at top
     g_tft.setTextColor(ST77XX_BLUE);
     g_tft.setTextSize(3);
     g_tft.setCursor(0, 0);
-    g_tft.print(rad2Deg(twa), 0);
+    g_tft.print(g_trueWind.getBearing(), 0);
     g_tft.println((char)0xf8);
     g_tft.setTextSize(1);
     g_tft.print("TWA");
 
     g_tft.setTextSize(3);
-    tftPrintJustified(tws, 1, nullptr, DISPLAY_WIDTH, 0, TXT_JUSTIFIED);
+    drawJustifiedVal(g_trueWind.getMagnitude(), 1, nullptr, DISPLAY_WIDTH, 0, TXT_JUSTIFIED);
 
     // Apparent wind angle and speed at bottom
     g_tft.setTextColor(ST77XX_RED);
@@ -601,17 +596,17 @@ void displayPageWind() {
     g_tft.print("AWA");
     g_tft.setTextSize(3);
     g_tft.setCursor(0, 112);
-    g_tft.print(rad2Deg(awa), 0);
+    g_tft.print(g_appWind.getBearing(), 0);
     g_tft.print((char)0xf8);
 
     g_tft.setTextSize(3);
-    tftPrintJustified(aws, 1, nullptr, DISPLAY_WIDTH, DISPLAY_HEIGHT, TXT_JUSTIFIED);
+    drawJustifiedVal(g_appWind.getMagnitude(), 1, nullptr, DISPLAY_WIDTH, DISPLAY_HEIGHT, TXT_JUSTIFIED);
 
     // Local SOG and COG in center of dial
     g_tft.setTextColor(ST77XX_YELLOW);
     g_tft.setTextSize(2);
-    tftPrintJustified(sog, 1, nullptr, x0, y0 - 15, TXT_CENTERED);
-    tftPrintJustified(rad2Deg(cog), 0, g_degStr, x0, y0 + 5, TXT_CENTERED);
+    drawJustifiedVal(g_localVelocity.getMagnitude(), 1, nullptr, x0, y0 - 15, TXT_CENTERED);
+    drawJustifiedVal(g_localVelocity.getBearing(), 0, g_degStr, x0, y0 + 5, TXT_CENTERED);
 
     // Depth to left of dial
     g_tft.setTextColor(ST77XX_GREEN);
@@ -778,7 +773,7 @@ void displayPagePosition() {
     // Heading
     buffer[0] = '\0';
     snprintf(buffer, sizeof(buffer), "HDG %.0f%s",
-             rad2Deg(g_hdg), g_degStr);
+             g_hdg, g_degStr);
     g_tft.println(buffer);
 
     // COG and SOG
@@ -790,17 +785,17 @@ void displayPagePosition() {
 
     // True wind direction and speed in blue
     g_tft.setTextColor(ST77XX_BLUE);
-    double twd = g_hdg + twa;
+    double twd = g_hdg + g_trueWind.getBearing();
     buffer[0] = '\0';
     snprintf(buffer, sizeof(buffer), "TWD %.0f%s %.0fkts",
-             rad2Deg(twd), g_degStr, tws);
+             twd, g_degStr, g_trueWind.getMagnitude());
     g_tft.println(buffer);
 
     // Apparent wind angle and speed in red
     g_tft.setTextColor(ST77XX_RED);
     buffer[0] = '\0';
     snprintf(buffer, sizeof(buffer), "AWA %.0f%s %.0fkts",
-             rad2Deg(awa), g_degStr, aws);
+             g_appWind.getBearing(), g_degStr, g_appWind.getMagnitude());
     g_tft.println(buffer);
 
     // Depth in green
@@ -903,9 +898,9 @@ void displayPageAis(Page pg, time_t now) {
             // Draw CPA info top-right
             if (cpat >= 0.0 && !std::isnan(cpad)) {
                 g_tft.setTextColor(ST77XX_RED);
-                tftPrintJustified(cpad, 2, "nm", DISPLAY_WIDTH, 0, TXT_JUSTIFIED);
-                tftPrintJustified(cpab, 0, g_degStr, DISPLAY_WIDTH, 32, TXT_JUSTIFIED);
-                tftPrintJustified(cpat, 1, "m", DISPLAY_WIDTH, 48, TXT_JUSTIFIED);
+                drawJustifiedVal(cpad, 2, "nm", DISPLAY_WIDTH, 0, TXT_JUSTIFIED);
+                drawJustifiedVal(cpab, 0, g_degStr, DISPLAY_WIDTH, 32, TXT_JUSTIFIED);
+                drawJustifiedVal(cpat, 1, "m", DISPLAY_WIDTH, 48, TXT_JUSTIFIED);
             }
 
             // Draw selected vessel in white
@@ -1116,9 +1111,7 @@ void handlePgn129025Msg(const tN2kMsg &N2kMsg) {
         // of all AIS targets.
         if (bIsFirstPos) {
             for (auto t : g_targets) {
-                if (t->getTimestamp() != 0) {
-                    t->calcCpa(g_localPos, g_localVelocity);
-                }
+                t->calcCpa(g_localPos, g_localVelocity);
             }
         }
     }
@@ -1132,8 +1125,6 @@ void handlePgn129026Msg(const tN2kMsg &N2kMsg) {
 
     if (ParseN2kCOGSOGRapid(N2kMsg, sid, ref, val1, val2)) {
         if (ref == 0 && !std::isnan(val1) && !std::isnan(val2)) {
-            cog = val1;
-            sog = metersPerSec2Kts(val2);
             g_localVelocity.set(metersPerSec2Kts(val2), rad2Deg(val1));
         }
     }
@@ -1289,17 +1280,11 @@ void handlePgn130306Msg(const tN2kMsg &N2kMsg) {
     if (ParseN2kWindSpeed(N2kMsg, sid, val1, val2, ref2)) {
         if (ref2 == N2kWind_Apparent && !std::isnan(val1) && !std::isnan(val2)) {
 
-            aws = metersPerSec2Kts(val1);
-            awa = getSignedBearing(val2);
+            g_appWind.set(val1, rad2Deg(val2));
 
-            // Calculate true wind
-            N2kVector aw(aws, val2);
-            N2kVector boat(sog, 0);
-
-            N2kVector tw;
-            tw.setXY(aw.getX() - boat.getX(), aw.getY() - boat.getY());
-            tws = tw.getMagnitude();
-            twa = getSignedBearing(tw.getBearing());
+            // Calculate true wind, relative to boat
+            N2kVector boat(g_localVelocity.getMagnitude(), 0);
+            g_trueWind.setXY(g_appWind.getX() - boat.getX(), g_appWind.getY() - boat.getY());
         }
     }
 }
@@ -1321,10 +1306,10 @@ void handlePgn127250Msg(const tN2kMsg &N2kMsg) {
             if (deviation == N2kDoubleNA) {
                 deviation = 0.0;
             }
-            g_hdg = heading + deviation + variation;
+            g_hdg = normalizeBearing(rad2Deg(heading + deviation + variation));
         }
         else {
-            g_hdg = heading;
+            g_hdg = rad2Deg(heading);
         }
     }
 }
