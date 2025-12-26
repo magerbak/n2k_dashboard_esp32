@@ -1,12 +1,17 @@
 #pragma once
 
-// Stores a rolling history of minimum and maximum data.
+// Stores a rolling history of minimum and maximum data values of type T.
+//
+// To be memory efficient, the design anticipates a use-case where we track
+// the minimum and maximum value for some interval and then record a history of
+// N values of this tuple.
 //
 // Min/max data is updated every time updateData is called.
 // History is advanced each time updateHistory is called.
 // History data is retrieved by passing a callback to forEachData. Callback will
 //   be called once or twice (after buffer has wrapped) with a range of data (oldest
-//   to newest). Final call will be when offset + len == getLength()
+//   to newest) for min and max values.
+//   Final call will be when offset + len == getLength()
 template <typename T>
 class MinMaxDataHistory
 {

@@ -61,8 +61,10 @@ bool N2kAISTarget::copyTrimmed(char* dest, const char* src, size_t size) {
 
 void N2kAISTarget::calcCpa(const N2kPos &refPos, const N2kVector &refVelocity)
 {
-    m_relDistance = m_pos.getRelDistance(refPos);
-    m_cpa.update(m_pos, m_velocity, refPos, refVelocity);
+    if (getTimestamp() != 0) {
+        m_relDistance = m_pos.getRelDistance(refPos);
+        m_cpa.update(m_pos, m_velocity, refPos, refVelocity);
+    }
 }
 
 bool N2kAISTarget::toString(char* buffer, size_t len) const
