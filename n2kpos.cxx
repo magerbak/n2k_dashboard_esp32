@@ -78,21 +78,21 @@ bool N2kPos::toString(char* buf, size_t maxlen, FormatOption fmt) const
     switch (fmt) {
     case FMT_LAT_ONLY:
         rc = snprintf(buf, maxlen,
-                      "%.0f°%.3f'%c",
-                      degsLat, minsLat, m_lat >= 0 ? 'N' : 'S');
+                      "%.0f%c %.3f'%c",
+                      degsLat, (char)0xf8, minsLat, m_lat >= 0 ? 'N' : 'S');
         break;
 
     case FMT_LON_ONLY:
         rc = snprintf(buf, maxlen,
-                      "%03.0f°%.3f'%c",
-                      degsLon, minsLon, m_lon >= 0 ? 'E' : 'W');
+                      "%03.0f%c %.3f'%c",
+                      degsLon, (char)0xf8, minsLon, m_lon >= 0 ? 'E' : 'W');
         break;
 
     case FMT_LAT_AND_LON:
         rc = snprintf(buf, maxlen,
-                      "%.0f°%.3f'%c %03.0f°%.3f'%c",
-                      degsLat, minsLat, m_lat >= 0 ? 'N' : 'S',
-                      degsLon, minsLon, m_lon >= 0 ? 'E' : 'W');
+                      "%.0f%c %.3f'%c %03.0f%c %.3f'%c",
+                      degsLat, (char)0xf8, minsLat, m_lat >= 0 ? 'N' : 'S',
+                      degsLon, (char)0xf8, minsLon, m_lon >= 0 ? 'E' : 'W');
         break;
     }
 
