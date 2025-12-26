@@ -779,13 +779,13 @@ void displayPagePosition() {
     // COG and SOG
     buffer[0] = '\0';
     snprintf(buffer, sizeof(buffer), "COG %.0f%s %.1fkts",
-             rad2Deg(g_localVelocity.getBearing()), g_degStr,
+             g_localVelocity.getBearing(), g_degStr,
              g_localVelocity.getMagnitude());
     g_tft.println(buffer);
 
     // True wind direction and speed in blue
     g_tft.setTextColor(ST77XX_BLUE);
-    double twd = g_hdg + g_trueWind.getBearing();
+    double twd = normalizeBearing(g_hdg + g_trueWind.getBearing());
     buffer[0] = '\0';
     snprintf(buffer, sizeof(buffer), "TWD %.0f%s %.0fkts",
              twd, g_degStr, g_trueWind.getMagnitude());
