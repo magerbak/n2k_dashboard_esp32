@@ -581,7 +581,7 @@ void displayPageWind() {
     g_tft.setTextColor(ST77XX_BLUE);
     g_tft.setTextSize(3);
     g_tft.setCursor(0, 0);
-    g_tft.print(g_trueWind.getBearing(), 0);
+    g_tft.print(g_trueWind.getSignedBearing(), 0);
     g_tft.println((char)0xf8);
     g_tft.setTextSize(1);
     g_tft.print("TWA");
@@ -596,7 +596,7 @@ void displayPageWind() {
     g_tft.print("AWA");
     g_tft.setTextSize(3);
     g_tft.setCursor(0, 112);
-    g_tft.print(g_appWind.getBearing(), 0);
+    g_tft.print(g_appWind.getSignedBearing(), 0);
     g_tft.print((char)0xf8);
 
     g_tft.setTextSize(3);
@@ -785,7 +785,7 @@ void displayPagePosition() {
 
     // True wind direction and speed in blue
     g_tft.setTextColor(ST77XX_BLUE);
-    double twd = normalizeBearing(g_hdg + g_trueWind.getBearing());
+    double twd = normalizeBearing(g_hdg + g_trueWind.getSignedBearing());
     buffer[0] = '\0';
     snprintf(buffer, sizeof(buffer), "TWD %.0f%s %.0fkts",
              twd, g_degStr, g_trueWind.getMagnitude());
@@ -795,7 +795,7 @@ void displayPagePosition() {
     g_tft.setTextColor(ST77XX_RED);
     buffer[0] = '\0';
     snprintf(buffer, sizeof(buffer), "AWA %.0f%s %.0fkts",
-             g_appWind.getBearing(), g_degStr, g_appWind.getMagnitude());
+             g_appWind.getSignedBearing(), g_degStr, g_appWind.getMagnitude());
     g_tft.println(buffer);
 
     // Depth in green
@@ -1093,7 +1093,9 @@ void handlePgn128267Msg(const tN2kMsg &N2kMsg) {
     double val1, val2;
 
     if (ParseN2kWaterDepth(N2kMsg, sid, val1, val2)) {
-        g_depth = meters2Ft(val1 + val2);
+        if (val1 != N2kDoubleNA && val2 != N2kDoubleNA) {
+            g_depth = meters2Ft(val1 + val2);
+        }
     }
 }
 
@@ -1102,16 +1104,18 @@ void handlePgn129025Msg(const tN2kMsg &N2kMsg) {
     double val1, val2;
 
     if (ParseN2kPositionRapid(N2kMsg, val1, val2)) {
-        g_localPos.set(val1, val2);
+        if (val1 != N2kDoubleNA && val2 != N2kDoubleNA) {
+            g_localPos.set(val1, val2);
 
-        bool bIsFirstPos = !g_bPosValid;
-        g_bPosValid = true;
+            bool bIsFirstPos = !g_bPosValid;
+            g_bPosValid = true;
 
-        // If this is the first time we've received our position, update the CPA
-        // of all AIS targets.
-        if (bIsFirstPos) {
-            for (auto t : g_targets) {
-                t->calcCpa(g_localPos, g_localVelocity);
+            // If this is the first time we've received our position, update the CPA
+            // of all AIS targets.
+            if (bIsFirstPos) {
+                for (auto t : g_targets) {
+                    t->calcCpa(g_localPos, g_localVelocity);
+                }
             }
         }
     }
@@ -1124,7 +1128,7 @@ void handlePgn129026Msg(const tN2kMsg &N2kMsg) {
     tN2kHeadingReference ref;
 
     if (ParseN2kCOGSOGRapid(N2kMsg, sid, ref, val1, val2)) {
-        if (ref == 0 && !std::isnan(val1) && !std::isnan(val2)) {
+        if (ref == 0 && val1 != N2kDoubleNA && val2 != N2kDoubleNA) {
             g_localVelocity.set(metersPerSec2Kts(val2), rad2Deg(val1));
         }
     }
@@ -1278,8 +1282,7 @@ void handlePgn130306Msg(const tN2kMsg &N2kMsg) {
     tN2kWindReference ref2;
 
     if (ParseN2kWindSpeed(N2kMsg, sid, val1, val2, ref2)) {
-        if (ref2 == N2kWind_Apparent && !std::isnan(val1) && !std::isnan(val2)) {
-
+        if (ref2 == N2kWind_Apparent && val1 != N2kDoubleNA && val2 != N2kDoubleNA) {
             g_appWind.set(val1, rad2Deg(val2));
 
             // Calculate true wind, relative to boat
@@ -1298,18 +1301,20 @@ void handlePgn127250Msg(const tN2kMsg &N2kMsg) {
     tN2kHeadingReference ref;
 
     if (ParseN2kHeading(N2kMsg, sid, heading, deviation, variation, ref)) {
-        if (ref == N2khr_magnetic) {
-            if (variation == N2kDoubleNA) {
-                // If variation is unknown use variation for Boston, MA in 2025.
-                variation = deg2Rad(-14.0);
+        if (heading != N2kDoubleNA) {
+            if (ref == N2khr_magnetic) {
+                if (variation == N2kDoubleNA) {
+                    // If variation is unknown use variation for Boston, MA in 2025.
+                    variation = deg2Rad(-14.0);
+                }
+                if (deviation == N2kDoubleNA) {
+                    deviation = 0.0;
+                }
+                g_hdg = normalizeBearing(rad2Deg(heading + deviation + variation));
             }
-            if (deviation == N2kDoubleNA) {
-                deviation = 0.0;
+            else {
+                g_hdg = rad2Deg(heading);
             }
-            g_hdg = normalizeBearing(rad2Deg(heading + deviation + variation));
-        }
-        else {
-            g_hdg = rad2Deg(heading);
         }
     }
 }
