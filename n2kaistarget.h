@@ -8,6 +8,23 @@
 #include "n2kvector.h"
 #include "n2kcpa.h"
 
+// Represents an AIS target.
+//
+// MMSI is used as the unique identifier for each object and is required at
+// construction time.
+//
+// Depending on which messages have been subsequently received, only a subset
+// of information may be populated.
+//
+// In particular, static vessel info (length, name, etc) is generally received
+// separately from dynamic info (position, speed, etc). Class B reports contain
+// a subset of class A information.
+//
+// getTimestamp will return 0 until dynamic data has been set.
+//
+// getName will return the MMSI in the absence of static vessel name info.
+//
+// calcCPA will be ignored until dynamic position info has been received.
 class N2kAISTarget
 {
 public:
