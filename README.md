@@ -29,7 +29,7 @@ Displays basic wind information.
 * Depth is shown to the left in green.
 
 ## History Detail
-D1 toggles to a history detail page. The D0 button cycles through histories of TWS, AWS, SOG and Depth, showing maximum, minimum and average values over the last hour. Vertical axis is divided every 10 units.
+D1 toggles to a history detail page. The D0 button cycles through 1 hour histories of TWS, AWS, SOG and Depth showing the range of values over each 1 minute interval. The overall maximum, minimum and average values over the last hour are displayed at bottom left. The vertical axis is divided every 10 units.
 
 ![TWSHistory](https://github.com/user-attachments/assets/59321a81-251f-41e7-b92b-f3c0120028cd)
 
