@@ -4,7 +4,7 @@
 #include "n2kpos.h"
 #include "n2kvector.h"
 
-// Represents the closest point of approach of vessel B to vessel A.
+// Represents the closest point of approach of vessel A to vessel B.
 //
 // To calculate, we need the position and velocity of both vessels and this
 // yields a range, bearing and time (stored in epoch time).
