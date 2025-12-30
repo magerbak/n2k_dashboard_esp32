@@ -9,7 +9,7 @@
   internal CAN controller (external transceiver required).
 
  **************************************************************************/
-//#define TESTING
+#define TESTING
 
 #include <limits>
 #include <list>
@@ -60,8 +60,8 @@ enum Page {
     PAGE_WIND,
     PAGE_POSITION,
     PAGE_AIS_12NM,
-    PAGE_AIS_4NM,
-    PAGE_AIS_1NM,
+    PAGE_AIS_6NM,
+    PAGE_AIS_3NM,
     NUM_PAGES
 } g_page = PAGE_WIND;
 
@@ -301,8 +301,8 @@ void handlePageButtonEvents(Event e) {
                 break;
 
             case PAGE_AIS_12NM:
-            case PAGE_AIS_4NM:
-            case PAGE_AIS_1NM:
+            case PAGE_AIS_6NM:
+            case PAGE_AIS_3NM:
                 if (g_targets.size() > 0) {
                     switch (e) {
                         case EVT_D0_PRESS:
@@ -821,7 +821,7 @@ void displayPagePosition() {
 // D2 cycles to next top-level page.
 void displayPageAis(Page pg, time_t now) {
     const double radius = DISPLAY_HEIGHT / 2.0 - 7.0;
-    double range = pg == PAGE_AIS_12NM ? 12.0 : pg == PAGE_AIS_4NM ? 4.0 : 1.0;
+    double range = pg == PAGE_AIS_12NM ? 12.0 : pg == PAGE_AIS_6NM ? 6.0 : 3.0;
     double range_scale = radius / range;
     double vector_scale = range_scale / 12.0;;
     int x0 = DISPLAY_WIDTH / 2;
@@ -830,11 +830,10 @@ void displayPageAis(Page pg, time_t now) {
     g_tft.setTextWrap(false);
     g_tft.fillScreen(ST77XX_BLACK);
 
-    // Draw range circles. Possibly we should have fewer.
+    // Draw range circles.
     g_tft.drawCircle(x0, y0, round(range * range_scale), ST77XX_WHITE);
-    g_tft.drawCircle(x0, y0, round(range * 0.75 * range_scale), ST77XX_WHITE);
-    g_tft.drawCircle(x0, y0, round(range * 0.5 * range_scale), ST77XX_WHITE);
-    g_tft.drawCircle(x0, y0, round(range * 0.25 * range_scale), ST77XX_WHITE);
+    g_tft.drawCircle(x0, y0, round(range * 0.67 * range_scale), ST77XX_WHITE);
+    g_tft.drawCircle(x0, y0, round(range * 0.33 * range_scale), ST77XX_WHITE);
 
     // Display page max range top-left.
     g_tft.setTextColor(ST77XX_WHITE);
@@ -947,7 +946,7 @@ void setTarget(const N2kAISTarget* p) {
 
 // Is the AIS target visible on the current AIS page?
 bool isVisibleTarget(const N2kAISTarget* t, Page pg) {
-    double range = pg == PAGE_AIS_12NM ? 12.0 : pg == PAGE_AIS_4NM ? 4.0 : 1.0;
+    double range = pg == PAGE_AIS_12NM ? 12.0 : pg == PAGE_AIS_6NM ? 6.0 : 3.0;
 
     if (t->getTimestamp() == 0) {
         // Static data only (no position) so skip
@@ -965,7 +964,7 @@ bool isVisibleTarget(const N2kAISTarget* t, Page pg) {
 bool isDangerousTarget(double d, double t) {
     if (!std::isnan(d) && !std::isnan(t)) {
         // Yes, if under 1nm within the next 60mins.
-        return d<1.0 &&t> 0 && t < 60;
+        return d < 1.0 && t > 0 && t < 60;
     }
     return false;
 }
@@ -1025,6 +1024,8 @@ void displaySubpageAisInfo() {
                 g_tft.print("Dft ");
                 g_tft.print(t->getDraft(), 1);
                 g_tft.println("ft ");
+
+                break;
             }
         }
     }
@@ -1055,8 +1056,8 @@ void displayUpdate(bool bForce) {
                         break;
 
                     case PAGE_AIS_12NM:
-                    case PAGE_AIS_4NM:
-                    case PAGE_AIS_1NM:
+                    case PAGE_AIS_6NM:
+                    case PAGE_AIS_3NM:
                         displayPageAis(g_page, now);
                         break;
                 }
