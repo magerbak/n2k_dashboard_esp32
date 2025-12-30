@@ -23,7 +23,7 @@ All headings and courses are relative to true North and speeds are in knots. Dis
 Displays basic wind information.
 
 ![WindInfo](https://github.com/user-attachments/assets/ce0ab38e-9fd4-4edd-9cf3-04a6386749e4)
-* The radial dial shows the apparent wind angle (AWA) with the boat course (COG) and speed (SOG) in yellow in the center.
+* The radial dial shows the apparent wind angle (AWA) with the boat speed (SOG) and course (COG) in yellow in the center.
 * Apparent wind angle (AWA) is also shown in red in the bottom left. Apparent wind speed (AWS) is shown in red in the bottom right with a 1 hour history graph.
 * True wind angle (TWA) is shown in blue in the top left. True wind speed (TWS) is shown in blue in the top-right with a 1 hour history graph.
 * Depth is shown to the left in green.
@@ -38,7 +38,7 @@ Intended to provide information at a glance for making logbook entries.
 
 ![PosInfo](https://github.com/user-attachments/assets/c6b03e57-e9e2-4854-a31a-6017e8b9ef8b)
 
-# AIS Info (12nm, 4nm, 1nm)
+# AIS Info (12nm, 6nm, 3nm)
 Displays a North-up graphical representation of AIS targets within the selected range.
 
 ![AISInfo](https://github.com/user-attachments/assets/d307fb4b-1ccf-419e-85a0-05d7123d3347)
