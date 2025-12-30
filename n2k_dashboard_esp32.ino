@@ -9,7 +9,7 @@
   internal CAN controller (external transceiver required).
 
  **************************************************************************/
-#define TESTING
+//#define TESTING
 
 #include <limits>
 #include <list>
