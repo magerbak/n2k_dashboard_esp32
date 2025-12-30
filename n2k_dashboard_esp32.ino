@@ -1,8 +1,8 @@
 /**************************************************************************
   Monitors NMEA2000 bus and displays a simple dashboard of useful info.
 
-  Works with the Adafruit ESP32-S3 TFT Feather
-    ----> http://www.adafruit.com/products/5300
+  Works with the Adafruit ESP32-S3 Reverse TFT Feather
+    ----> https://www.adafruit.com/products/5691
 
   Uses the Adafruit GFX library and the ST7789 display driver.
   Uses the NEMA2000 library for parsing N2K communications using the ESP32
