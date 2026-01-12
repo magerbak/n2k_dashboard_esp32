@@ -422,7 +422,6 @@ done:
 bool updateCallback(void* user) {
     bool bChanged = false;
     time_t now = time(nullptr);
-    time_t diff = now - g_lastUpdate;
 
     (void)user;
 
@@ -446,6 +445,10 @@ bool updateCallback(void* user) {
     g_twsHistory.updateData(g_trueWind.getMagnitude());
     g_sogHistory.updateData(g_localVelocity.getMagnitude());
     g_depthHistory.updateData(g_depth);
+
+    if (g_subpage >= SUBPAGE_HIST_TWS && g_subpage < SUBPAGE_HIST_SEPARATOR) {
+        bChanged = true;
+    }
 
     if (bChanged) {
         displayUpdate(true);
