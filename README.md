@@ -7,7 +7,7 @@ Relies on the very useful https://github.com/ttlappalainen/NMEA2000 library and 
 
 Also uses the Adafruit ST7789 TFT display driver and Adafruit GFX library for drawing primitives.
 
-Approximate power consumption including an external transceiver and 12v to 5V buck converter is about 50mA.
+Approximate power consumption including an external transceiver and 12v to 5v buck converter is about 50mA.
 
 # Overview
 Provides top-level pages for wind, position and AIS info (at three different ranges). 
@@ -34,9 +34,11 @@ D1 toggles to a history detail page. The D0 button cycles through 1 hour histori
 ![TWSHistory](https://github.com/user-attachments/assets/59321a81-251f-41e7-b92b-f3c0120028cd)
 
 # Position Info
-Intended to provide information at a glance for making logbook entries.
+Intended to provide information at a glance for making logbook entries or radio calls.
 
 ![PosInfo](https://github.com/user-attachments/assets/c6b03e57-e9e2-4854-a31a-6017e8b9ef8b)
+
+This page includes heading and absolute true wind direction, which are not displayed on the Wind Info page.
 
 # AIS Info (12nm, 6nm, 3nm)
 Displays a North-up graphical representation of AIS targets within the selected range.
@@ -45,12 +47,16 @@ Displays a North-up graphical representation of AIS targets within the selected 
 
 * Speed vectors in yellow show projected position in 5 minutes.
 * Targets shown in red are considered potential collision issues (closest point of approach is < 1nm within the next hour).
-* D0 cycles through the targets (selected target is white).
+* D0 cycles through the targets (selected vessel is white).
+* D1 toggles a subpage displaying additional information for the selected vessel.
 * Selected vessel's range, bearing and name/MMSI are displayed in green at bottom left.
-* If the sellected vessel is approaching then their closest point of approach (CPA) distance, bearing and time (mins) is shown in red at top right.
+* If the sellected vessel is approaching their closest point of approach (CPA) distance, bearing and time (mins) is shown in red at top right.
+* Targets are removed 60s after their last report.
 
 ## AIS Vessel Info
-D1 toggles displaying additional vessel information. D0 can also be used on this page to cycle through other vessels.
+The additional vessel info subpage includes static data for the selected vessel such and length and draft. How much information is available varies for Class A or Class B reports and depends on which messages have been received.
+
+* D0 can also be used on this page to select other vessels.
 
 ![AISVesselInfo](https://github.com/user-attachments/assets/633544c8-4bff-455a-8f09-9d6364685911)
 
