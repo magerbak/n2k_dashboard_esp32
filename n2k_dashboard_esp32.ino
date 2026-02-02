@@ -19,6 +19,7 @@
 
 #include "N2kMsg.h"
 #include "NMEA2000.h"
+#define ESP32_CAN_SILENT_PIN GPIO_NUM_9
 #define ESP32_CAN_TX_PIN GPIO_NUM_6
 #define ESP32_CAN_RX_PIN GPIO_NUM_5
 #include <NMEA2000_esp32.h> // Custom NMEA2000_esp32 support for S3 (https://github.com/offspring/NMEA2000_esp32)
@@ -198,6 +199,10 @@ void setup(void) {
   Serial.begin(115200);
   delay(1000);
   Serial.println(F("Starting N2K dashboard"));
+
+  // Set N2k transceiver to silent mode.
+  pinMode(ESP32_CAN_SILENT_PIN, OUTPUT);
+  digitalWrite(ESP32_CAN_SILENT_PIN, LOW /* silent mode seems to disable Rx so use normal mode for now HIGH */);
 
   g_buttonD0.begin();
   g_buttonD1.begin();
