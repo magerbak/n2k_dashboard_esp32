@@ -69,8 +69,8 @@ enum Page {
 enum Subpage {
     SUBPAGE_NONE,
 
-    SUBPAGE_HIST_TWS,
     SUBPAGE_HIST_AWS,
+    SUBPAGE_HIST_TWS,
     SUBPAGE_HIST_SOG,
     SUBPAGE_HIST_DEPTH,
     SUBPAGE_HIST_SEPARATOR,
@@ -298,7 +298,7 @@ void handlePageButtonEvents(Event e) {
                 switch (e) {
                     case EVT_D1_PRESS:
                         // Switch to first history subpage
-                        g_subpage = SUBPAGE_HIST_TWS;
+                        g_subpage = SUBPAGE_HIST_AWS;
                         bNeedUpdate = true;
                         break;
 
@@ -367,8 +367,8 @@ void handleSubpageButtonEvents(Event e) {
     }
     else {
         switch (g_subpage) {
-            case SUBPAGE_HIST_TWS:
             case SUBPAGE_HIST_AWS:
+            case SUBPAGE_HIST_TWS:
             case SUBPAGE_HIST_SOG:
             case SUBPAGE_HIST_DEPTH:
                 switch (e) {
@@ -376,7 +376,7 @@ void handleSubpageButtonEvents(Event e) {
                     case EVT_D0_PRESS:
                         p = (int)g_subpage + 1;
                         if (p == SUBPAGE_HIST_SEPARATOR) {
-                            p = SUBPAGE_HIST_TWS;
+                            p = SUBPAGE_HIST_AWS;
                         }
                         g_subpage = (Subpage)p;
                         bNeedUpdate = true;
@@ -453,7 +453,7 @@ bool updateCallback(void* user) {
     g_sogHistory.updateData(g_localVelocity.getMagnitude());
     g_depthHistory.updateData(g_depth);
 
-    if (g_subpage >= SUBPAGE_HIST_TWS && g_subpage < SUBPAGE_HIST_SEPARATOR) {
+    if (g_subpage >= SUBPAGE_HIST_AWS && g_subpage < SUBPAGE_HIST_SEPARATOR) {
         bChanged = true;
     }
 
@@ -545,72 +545,70 @@ void displayPageWind() {
     g_tft.setTextWrap(false);
     g_tft.fillScreen(ST77XX_BLACK);
 
-    // TWS history top right
-    hist_window.color = ST77XX_BLUE;
-    hist_window.x = DISPLAY_WIDTH - g_twsHistory.getLength();
-    hist_window.y = 30;
-    hist_window.w = 60;
-    hist_window.h = 30;
-    hist_window.range_x = g_twsHistory.getSize();
-    hist_window.range_y = hist_window.h;
-    g_twsHistory.forEachData(drawHistoryCallback, &hist_window);
-
-    // AWS history bottom right
+    // AWS history top left
     hist_window.color = ST77XX_RED;
-    hist_window.x = DISPLAY_WIDTH - g_twsHistory.getLength();
-    hist_window.y = 70;
+    hist_window.x = 0; // 60 - g_awsHistory.getLength();
+    hist_window.y = 30;
     hist_window.w = 60;
     hist_window.h = 30;
     hist_window.range_x = g_awsHistory.getSize();
     hist_window.range_y = hist_window.h;
     g_awsHistory.forEachData(drawHistoryCallback, &hist_window);
 
+    // TWS history bottom left
+    hist_window.color = ST77XX_BLUE;
+    hist_window.x = 0; // 60 - g_twsHistory.getLength();
+    hist_window.y = 70;
+    hist_window.w = 60;
+    hist_window.h = 30;
+    hist_window.range_x = g_twsHistory.getSize();
+    hist_window.range_y = hist_window.h;
+    g_twsHistory.forEachData(drawHistoryCallback, &hist_window);
+
     g_tft.startWrite();
     // Draw port quadrants in red
-    g_tft.drawCircleHelper(x0, y0, 60, 0x1, ST77XX_RED);
-    g_tft.drawCircleHelper(x0, y0, 60, 0x8, ST77XX_RED);
     g_tft.drawCircleHelper(x0, y0, 59, 0x1, ST77XX_RED);
     g_tft.drawCircleHelper(x0, y0, 59, 0x8, ST77XX_RED);
+    g_tft.drawCircleHelper(x0, y0, 58, 0x1, ST77XX_RED);
+    g_tft.drawCircleHelper(x0, y0, 58, 0x8, ST77XX_RED);
     // Draw starboard quadrants in green
-    g_tft.drawCircleHelper(x0, y0, 60, 0x2, ST77XX_GREEN);
-    g_tft.drawCircleHelper(x0, y0, 60, 0x4, ST77XX_GREEN);
     g_tft.drawCircleHelper(x0, y0, 59, 0x2, ST77XX_GREEN);
     g_tft.drawCircleHelper(x0, y0, 59, 0x4, ST77XX_GREEN);
+    g_tft.drawCircleHelper(x0, y0, 58, 0x2, ST77XX_GREEN);
+    g_tft.drawCircleHelper(x0, y0, 58, 0x4, ST77XX_GREEN);
     g_tft.endWrite();
 
     for (int d = 0; d < 360; d += 10) {
-        drawRadial(x0,  y0,  58,  d,  2,  ST77XX_WHITE);
+        drawRadial(x0,  y0,  57,  d,  2,  ST77XX_WHITE);
     }
     for (int d = 0; d < 360; d += 30) {
-        drawRadial(x0,  y0,  58,  d,  6,  ST77XX_WHITE);
+        drawRadial(x0,  y0,  57,  d,  6,  ST77XX_WHITE);
     }
 
     drawRadial(x0, y0, 50, g_appWind.getBearing(), 20, ST77XX_WHITE);
 
-    // True wind angle and speed at top
-    g_tft.setTextColor(ST77XX_BLUE);
+    // Apparent wind speed and angle at top
+    g_tft.setTextColor(ST77XX_RED);
     g_tft.setTextSize(3);
     g_tft.setCursor(0, 0);
-    g_tft.print(g_trueWind.getSignedBearing(), 0);
-    g_tft.println((char)0xf8);
-    g_tft.setTextSize(1);
-    g_tft.print("TWA");
+    g_tft.print(g_trueWind.getMagnitude(), 1);
 
-    g_tft.setTextSize(3);
-    drawJustifiedVal(g_trueWind.getMagnitude(), 1, nullptr, DISPLAY_WIDTH, 0, TXT_JUSTIFIED);
-
-    // Apparent wind angle and speed at bottom
-    g_tft.setTextColor(ST77XX_RED);
+    drawJustifiedVal(g_appWind.getSignedBearing(), 0, g_degStr, DISPLAY_WIDTH, 0, TXT_JUSTIFIED);
     g_tft.setTextSize(1);
-    g_tft.setCursor(0, 102);
+    g_tft.setCursor(DISPLAY_WIDTH - 18, 24);
     g_tft.print("AWA");
+
+    // True wind speed and angle at bottom
+    g_tft.setTextColor(ST77XX_BLUE);
     g_tft.setTextSize(3);
     g_tft.setCursor(0, 112);
-    g_tft.print(g_appWind.getSignedBearing(), 0);
-    g_tft.print((char)0xf8);
+    g_tft.print(g_appWind.getMagnitude(), 1);
 
+    g_tft.setTextSize(1);
+    g_tft.setCursor(DISPLAY_WIDTH - 18, DISPLAY_HEIGHT - 36);
+    g_tft.print("TWA");
     g_tft.setTextSize(3);
-    drawJustifiedVal(g_appWind.getMagnitude(), 1, nullptr, DISPLAY_WIDTH, DISPLAY_HEIGHT, TXT_JUSTIFIED);
+    drawJustifiedVal(g_appWind.getSignedBearing(), 0, g_degStr, DISPLAY_WIDTH, DISPLAY_HEIGHT, TXT_JUSTIFIED);
 
     // Local SOG and COG in center of dial
     g_tft.setTextColor(ST77XX_YELLOW);
@@ -618,12 +616,13 @@ void displayPageWind() {
     drawJustifiedVal(g_localVelocity.getMagnitude(), 1, nullptr, x0, y0 - 15, TXT_CENTERED);
     drawJustifiedVal(g_localVelocity.getBearing(), 0, g_degStr, x0, y0 + 5, TXT_CENTERED);
 
-    // Depth to left of dial
+    // Depth to right of dial
+    int precision = g_depth > 100.0 ? 0 : 1;
     g_tft.setTextColor(ST77XX_GREEN);
-    g_tft.setCursor(0, 60);
-    g_tft.println(g_depth, 1);
+    g_tft.setTextSize(2);
+    drawJustifiedVal(g_depth, precision, nullptr, DISPLAY_WIDTH, 70, TXT_JUSTIFIED);
     g_tft.setTextSize(1);
-    g_tft.print("ft");
+    drawJustifiedText("ft", DISPLAY_WIDTH, 78, TXT_JUSTIFIED);
 }
 
 // Helper function to draw a partial radial of a circle of radius r at x0, y0.
@@ -793,19 +792,19 @@ void displayPagePosition() {
              g_localVelocity.getMagnitude());
     g_tft.println(buffer);
 
+    // Apparent wind angle and speed in red
+    g_tft.setTextColor(ST77XX_RED);
+    buffer[0] = '\0';
+    snprintf(buffer, sizeof(buffer), "AWA %.0f%s %.0fkts",
+             g_appWind.getSignedBearing(), g_degStr, g_appWind.getMagnitude());
+    g_tft.println(buffer);
+
     // True wind direction and speed in blue
     g_tft.setTextColor(ST77XX_BLUE);
     double twd = normalizeBearing(g_hdg + g_trueWind.getSignedBearing());
     buffer[0] = '\0';
     snprintf(buffer, sizeof(buffer), "TWD %.0f%s %.0fkts",
              twd, g_degStr, g_trueWind.getMagnitude());
-    g_tft.println(buffer);
-
-    // Apparent wind angle and speed in red
-    g_tft.setTextColor(ST77XX_RED);
-    buffer[0] = '\0';
-    snprintf(buffer, sizeof(buffer), "AWA %.0f%s %.0fkts",
-             g_appWind.getSignedBearing(), g_degStr, g_appWind.getMagnitude());
     g_tft.println(buffer);
 
     // Depth in green
@@ -1073,12 +1072,12 @@ void displayUpdate(bool bForce) {
                 }
                 break;
 
-            case SUBPAGE_HIST_TWS:
-                displaySubpageHistory("TWS", &g_twsHistory, ST77XX_BLUE);
-                break;
-
             case SUBPAGE_HIST_AWS:
                 displaySubpageHistory("AWS", &g_awsHistory, ST77XX_RED);
+                break;
+
+            case SUBPAGE_HIST_TWS:
+                displaySubpageHistory("TWS", &g_twsHistory, ST77XX_BLUE);
                 break;
 
             case SUBPAGE_HIST_SOG:
