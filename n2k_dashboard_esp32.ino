@@ -200,9 +200,11 @@ void setup(void) {
   delay(1000);
   Serial.println(F("Starting N2K dashboard"));
 
-  // Set N2k transceiver to silent mode.
+  // Optionally, set N2k transceiver to silent mode. This only works if there is
+  // more than one device on the N2K network. If testing with a single transmitter,
+  // then our transmit must remain enabled so it can ACK messages.
   pinMode(ESP32_CAN_SILENT_PIN, OUTPUT);
-  digitalWrite(ESP32_CAN_SILENT_PIN, LOW /* silent mode seems to disable Rx so use normal mode for now HIGH */);
+  digitalWrite(ESP32_CAN_SILENT_PIN, LOW /* HIGH */); // not silent
 
   g_buttonD0.begin();
   g_buttonD1.begin();
