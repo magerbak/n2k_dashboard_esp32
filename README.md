@@ -22,11 +22,12 @@ All headings and courses are relative to true North and speeds are in knots. Dis
 # Wind Info
 Displays basic wind information.
 
-![WindInfo](https://github.com/user-attachments/assets/ce0ab38e-9fd4-4edd-9cf3-04a6386749e4)
+![PXL_20260303_225928172](https://github.com/user-attachments/assets/d1f87aaa-fd0a-4453-b1ff-37f20c9dc144)
+
 * The radial dial shows the apparent wind angle (AWA) with the boat speed (SOG) and course (COG) in yellow in the center.
-* Apparent wind angle (AWA) is also shown in red in the bottom left. Apparent wind speed (AWS) is shown in red in the bottom right with a 1 hour history graph.
-* True wind angle (TWA) is shown in blue in the top left. True wind speed (TWS) is shown in blue in the top-right with a 1 hour history graph.
-* Depth is shown to the left in green.
+* Apparent wind speed (AWS) and angle (AWA) are shown in red at the top with a 1 hour history graph of AWS.
+* True wind speed (TWS) and angle are shown in blue at the bottom with a 1 hour history graph of TWS.
+* Depth is shown to the right in green.
 
 ## History Detail
 D1 toggles to a history detail page. The D0 button cycles through 1 hour histories of TWS, AWS, SOG and Depth showing the range of values over each 1 minute interval. The overall maximum, minimum and average values over the last hour are displayed at bottom left. The vertical axis is divided every 10 units.
