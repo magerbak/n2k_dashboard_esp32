@@ -9,7 +9,7 @@
   internal CAN controller (external transceiver required).
 
  **************************************************************************/
-#define TESTING
+//#define TESTING
 
 #include <limits>
 #include <list>
@@ -33,6 +33,7 @@
 #include "n2kunits.h"
 #include "n2kaistarget.h"
 
+#define VERSION_NUM      "v1.0.1"
 #define UPDATE_INTERVAL  1
 #define AIS_TIMEOUT      60
 
@@ -484,6 +485,10 @@ void displaySplashScreen() {
   g_tft.setTextColor(ST77XX_GREEN);
   g_tft.setTextSize(3);
   g_tft.println("Hello Michael");
+
+  g_tft.setTextColor(ST77XX_YELLOW);
+  g_tft.setTextSize(1);
+  drawJustifiedText(VERSION_NUM, DISPLAY_WIDTH, DISPLAY_HEIGHT, TXT_JUSTIFIED);
 }
 
 // Helper function to print text using a calculated starting position based on
@@ -591,7 +596,7 @@ void displayPageWind() {
     g_tft.setTextColor(ST77XX_RED);
     g_tft.setTextSize(3);
     g_tft.setCursor(0, 0);
-    g_tft.print(g_trueWind.getMagnitude(), 1);
+    g_tft.print(g_appWind.getMagnitude(), 1);
 
     drawJustifiedVal(g_appWind.getSignedBearing(), 0, g_degStr, DISPLAY_WIDTH, 0, TXT_JUSTIFIED);
     g_tft.setTextSize(1);
@@ -602,13 +607,13 @@ void displayPageWind() {
     g_tft.setTextColor(ST77XX_BLUE);
     g_tft.setTextSize(3);
     g_tft.setCursor(0, 112);
-    g_tft.print(g_appWind.getMagnitude(), 1);
+    g_tft.print(g_trueWind.getMagnitude(), 1);
 
     g_tft.setTextSize(1);
     g_tft.setCursor(DISPLAY_WIDTH - 18, DISPLAY_HEIGHT - 36);
     g_tft.print("TWA");
     g_tft.setTextSize(3);
-    drawJustifiedVal(g_appWind.getSignedBearing(), 0, g_degStr, DISPLAY_WIDTH, DISPLAY_HEIGHT, TXT_JUSTIFIED);
+    drawJustifiedVal(g_trueWind.getSignedBearing(), 0, g_degStr, DISPLAY_WIDTH, DISPLAY_HEIGHT, TXT_JUSTIFIED);
 
     // Local SOG and COG in center of dial
     g_tft.setTextColor(ST77XX_YELLOW);
@@ -1139,6 +1144,13 @@ void handlePgn129026Msg(const tN2kMsg &N2kMsg) {
 
     if (ParseN2kCOGSOGRapid(N2kMsg, sid, ref, val1, val2)) {
         if (ref == 0 && val1 != N2kDoubleNA && val2 != N2kDoubleNA) {
+#ifdef TESTING
+            static double fake_sog = 2.0;
+            fake_sog += 0.25 - 0.5 * rand() / RAND_MAX;
+            fake_sog = std::min(3.0, fake_sog);
+            fake_sog = std::max(1.0, fake_sog);
+            val2 += fake_sog;
+#endif
             g_localVelocity.set(metersPerSec2Kts(val2), rad2Deg(val1));
         }
     }
@@ -1293,7 +1305,14 @@ void handlePgn130306Msg(const tN2kMsg &N2kMsg) {
 
     if (ParseN2kWindSpeed(N2kMsg, sid, val1, val2, ref2)) {
         if (ref2 == N2kWind_Apparent && val1 != N2kDoubleNA && val2 != N2kDoubleNA) {
-            g_appWind.set(val1, rad2Deg(val2));
+#ifdef TESTING
+            static double fake_aws = 2.0;
+            fake_aws += 0.5 - (double)rand()/ RAND_MAX;
+            fake_aws = std::min(6.0, fake_aws);
+            fake_aws = std::max(1.0, fake_aws);
+            val1 += fake_aws;
+#endif
+            g_appWind.set(metersPerSec2Kts(val1), rad2Deg(val2));
 
             // Calculate true wind, relative to boat
             N2kVector boat(g_localVelocity.getMagnitude(), 0);
