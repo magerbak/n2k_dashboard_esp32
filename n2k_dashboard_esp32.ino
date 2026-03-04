@@ -9,10 +9,11 @@
   internal CAN controller (external transceiver required).
 
  **************************************************************************/
-//#define TESTING
+#define TESTING
 
 #include <limits>
 #include <list>
+#include <Preferences.h>     // For persistent storage of log data
 #include <Adafruit_GFX.h>    // Core graphics library
 #include <Adafruit_ST7789.h> // Hardware-specific library for ST7789
 #include <SPI.h>
@@ -33,7 +34,7 @@
 #include "n2kunits.h"
 #include "n2kaistarget.h"
 
-#define VERSION_NUM      "v1.0.1"
+#define VERSION_NUM      "v1.0.2"
 #define UPDATE_INTERVAL  1
 #define AIS_TIMEOUT      60
 
@@ -42,8 +43,10 @@
 // Interval over which sampled min/max data is aggregated per data point in history.
 #ifdef TESTING
   #define HISTORY_AGGREGATION_INTERVAL_MS   (10 * 1000)
+  #define LOG_SAVE_INTERVAL_MS              (2 * 60 * 1000)
 #else
   #define HISTORY_AGGREGATION_INTERVAL_MS   (60 * 1000)
+  #define LOG_SAVE_INTERVAL_MS              (10 * 60 * 1000)
 #endif
 // Default number of data points in history - can be customized in setup().
 // Total duration of history = num data points * HISTORY_AGGREGATION_INTERVAL_MS
@@ -53,9 +56,6 @@ tNMEA2000 &g_NMEA2000=*(new tNMEA2000_esp32());
 
 #define DISPLAY_WIDTH   240
 #define DISPLAY_HEIGHT  135
-
-// Use dedicated hardware SPI pins
-Adafruit_ST7789 g_tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 
 // Display page
 enum Page {
@@ -118,6 +118,19 @@ struct HistStatsContext {
     double avg = 0.0;
 };
 
+struct LogData {
+    uint32_t duration;
+    float distance;
+};
+
+// Use dedicated hardware SPI pins
+Adafruit_ST7789 g_tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+
+// Log data
+Preferences g_prefs;
+LogData g_tripLog;          // Duration and distance of current trip
+bool g_tripResetConfirmation = false;
+N2kPos g_lastPos;           // Lat/Long of last log sample
 
 bool g_bPosValid = false;
 N2kPos g_localPos;          // Latitude and Longitude
@@ -140,14 +153,16 @@ DebouncedButton g_buttonD2(2);
 // 1s timer for refreshing data model (ageing out AIS targets, sampling data history).
 SimpleTimer g_updateTimer;
 
-// 60s timer interval for recording aggregate min/max history data.
+// 60s timer interval for recording aggregate min/max history and log data.
 SimpleTimer g_historyTimer;
+
+// 10min timer to save log data
+SimpleTimer g_logTimer;
 
 MinMaxDataHistory<double> g_awsHistory;
 MinMaxDataHistory<double> g_twsHistory;
 MinMaxDataHistory<double> g_sogHistory;
 MinMaxDataHistory<double> g_depthHistory;
-//MinMaxDataHistory<double> g_voltageHistory;
 
 // Time since last display update in millis.
 uint16_t g_lastUpdate = 0;
@@ -198,8 +213,13 @@ void handleNMEA2000Msg(const tN2kMsg &N2kMsg);
 
 void setup(void) {
   Serial.begin(115200);
-  delay(1000);
+  delay(2000);
   Serial.println(F("Starting N2K dashboard"));
+
+  g_prefs.begin("n2k_dashboard");
+
+  g_tripLog.duration = g_prefs.getUInt("tripLogTime", 0);
+  g_tripLog.distance = g_prefs.getFloat("tripLogDist", 0.0);
 
   // Optionally, set N2k transceiver to silent mode. This only works if there is
   // more than one device on the N2K network. If testing with a single transmitter,
@@ -213,6 +233,7 @@ void setup(void) {
 
   g_updateTimer.begin(nullptr, HISTORY_SAMPLE_INTERVAL_MS, updateCallback);
   g_historyTimer.begin(nullptr, HISTORY_AGGREGATION_INTERVAL_MS, historyCallback);
+  g_logTimer.begin(nullptr, LOG_SAVE_INTERVAL_MS, logCallback);
 
   // Record history of AWS, TWS and SOG for last 60mins.
   g_awsHistory.begin(60);
@@ -252,6 +273,7 @@ void loop() {
     // Drive our timers
     g_updateTimer.tick(t);
     g_historyTimer.tick(t);
+    g_logTimer.tick(t);
 
     // Poll buttons and drive UI
     if (g_buttonD0.updateState()) {
@@ -292,6 +314,7 @@ void handlePageButtonEvents(Event e) {
         }
         g_page = (Page)p;
         bNeedUpdate = true;
+        g_tripResetConfirmation = false;
     }
     else {
         switch (g_page) {
@@ -307,6 +330,30 @@ void handlePageButtonEvents(Event e) {
                         break;
                 }
                 break;
+
+            case PAGE_POSITION:
+                switch (e) {
+                    case EVT_D0_PRESS:
+                        if (g_tripResetConfirmation) {
+                            g_tripLog.duration = 0;
+                            g_tripLog.distance = 0.0;
+                            g_prefs.putUInt("tripLogTime", g_tripLog.duration);
+                            g_prefs.putFloat("tripLogDist", g_tripLog.distance);
+                            g_tripResetConfirmation = false;
+                        }
+                        else {
+                            g_tripResetConfirmation = true;
+                        }
+                        break;
+
+                    case EVT_D1_PRESS:
+                    case EVT_D2_PRESS:
+                        g_tripResetConfirmation = false;
+                        break;
+
+                    default:
+                        break;
+                }
 
             case PAGE_AIS_12NM:
             case PAGE_AIS_6NM:
@@ -472,6 +519,26 @@ bool historyCallback(void* user) {
     g_twsHistory.updateHistory();
     g_sogHistory.updateHistory();
     g_depthHistory.updateHistory();
+
+    // Sample position and accumulate running distance and time
+    if (g_bPosValid) {
+        N2kVector dist = g_localPos.getRelDistance(g_lastPos);
+        g_tripLog.duration += HISTORY_AGGREGATION_INTERVAL_MS / 1000;
+        g_tripLog.distance += dist.getMagnitude();
+        g_lastPos = g_localPos;
+    }
+
+    // Force a display refresh every so often even if we're not receiving data
+    displayUpdate(true);
+
+    // Continue running
+    return true;
+}
+
+bool logCallback(void* user) {
+    // Persist the accumulated log data
+    g_prefs.putUInt("tripLogTime", g_tripLog.duration);
+    g_prefs.putFloat("tripLogDist", g_tripLog.distance);
 
     // Continue running
     return true;
@@ -784,17 +851,22 @@ void displayPagePosition() {
     g_tft.setCursor(0, 55);
     g_tft.setTextSize(2);
 
-    // Heading
+    // Heading and course
     buffer[0] = '\0';
-    snprintf(buffer, sizeof(buffer), "HDG %.0f%s",
-             g_hdg, g_degStr);
+    snprintf(buffer, sizeof(buffer), "HDG %.0f%s COG %.0f%s",
+             g_hdg, g_degStr,
+             g_localVelocity.getBearing(), g_degStr);
     g_tft.println(buffer);
 
-    // COG and SOG
+    // SOG and trip average
+    float avg = 0.0;
     buffer[0] = '\0';
-    snprintf(buffer, sizeof(buffer), "COG %.0f%s %.1fkts",
-             g_localVelocity.getBearing(), g_degStr,
-             g_localVelocity.getMagnitude());
+
+    if (g_tripLog.duration > 0.0) {
+        avg = g_tripLog.distance * 3600 / g_tripLog.duration;
+    }
+    snprintf(buffer, sizeof(buffer), "SOG %.1fkts AVG %.1f",
+             g_localVelocity.getMagnitude(), avg);
     g_tft.println(buffer);
 
     // Apparent wind angle and speed in red
@@ -812,10 +884,17 @@ void displayPagePosition() {
              twd, g_degStr, g_trueWind.getMagnitude());
     g_tft.println(buffer);
 
-    // Depth in green
-    g_tft.setTextColor(ST77XX_GREEN);
+    // Trip data in yellow
+    g_tft.setTextColor(ST77XX_YELLOW);
     buffer[0] = '\0';
-    snprintf(buffer, sizeof(buffer), "Depth %.1fft", g_depth);
+    if (g_tripResetConfirmation) {
+        snprintf(buffer, sizeof(buffer), "Press again to RESET");
+    }
+    else {
+        snprintf(buffer, sizeof(buffer), "LOG %.1fnm %u:%02uhrs",
+                 round(g_tripLog.distance),
+                 g_tripLog.duration / 3600, (g_tripLog.duration % 3600) / 60);
+    }
     g_tft.println(buffer);
 }
 
@@ -1124,6 +1203,7 @@ void handlePgn129025Msg(const tN2kMsg &N2kMsg) {
 
             bool bIsFirstPos = !g_bPosValid;
             g_bPosValid = true;
+            g_lastPos = g_localPos;
 
             // If this is the first time we've received our position, update the CPA
             // of all AIS targets.
