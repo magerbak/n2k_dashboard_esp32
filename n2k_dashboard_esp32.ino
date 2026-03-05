@@ -9,7 +9,7 @@
   internal CAN controller (external transceiver required).
 
  **************************************************************************/
-#define TESTING
+//#define TESTING
 
 #include <limits>
 #include <memory>
@@ -35,7 +35,7 @@
 #include "n2kunits.h"
 #include "n2kaistarget.h"
 
-#define VERSION_NUM      "v1.0.2"
+#define VERSION_NUM      "v1.0.3"
 #define UPDATE_INTERVAL  1
 #define AIS_TIMEOUT      60
 
