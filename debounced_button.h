@@ -20,12 +20,12 @@ public:
     bool wasReleased();
 
 private:
-    static const uint16_t DEBOUNCE_INTERVAL_MS = 50;
+    static const uint32_t DEBOUNCE_INTERVAL_MS = 50;
 
     int m_pin = 0;
     int m_activeState = HIGH;
 
-    uint16_t m_lastChange = 0;
+    uint32_t m_lastChange = 0;
     int m_lastValue = LOW;
     int m_buttonValue = LOW;
 };
