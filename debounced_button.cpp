@@ -13,7 +13,7 @@ void DebouncedButton::begin() {
 
 bool DebouncedButton::updateState() {
     bool bChanged = false;
-    uint16_t now = millis();
+    uint32_t now = millis();
     int val = digitalRead(m_pin);
 
     if (val != m_lastValue) {

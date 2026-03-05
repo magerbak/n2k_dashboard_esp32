@@ -6,7 +6,7 @@ public:
     N2kVector() = default;
     // Bearing in degrees relative to 0' North.
     N2kVector(double mag, double bearing);
-    virtual ~N2kVector() = default;
+    ~N2kVector() = default;
 
     void set(double mag, double bearing);
     double getMagnitude() const { return m_mag; }

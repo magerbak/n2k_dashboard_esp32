@@ -10,7 +10,7 @@ public:
     N2kPos(double Lat, double Lon);
     ~N2kPos() = default;
 
-    void set(double Lat, double Lon) { m_lat = Lat; m_lon = Lon; }
+    bool set(double Lat, double Lon);
 
     double getLatitude() const { return m_lat; }
     double getLongitude() const { return m_lon; }

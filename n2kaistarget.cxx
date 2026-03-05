@@ -1,9 +1,9 @@
+#include <Arduino.h>  // For strlcpy
 #include <stdio.h>
 #include <time.h>
 #include <string.h>
 #include <cmath>
 
-#include "strlcpy.h"
 #include "n2kaistarget.h"
 
 N2kAISTarget::N2kAISTarget(uint32_t mmsi) :
@@ -50,12 +50,11 @@ void N2kAISTarget::update(uint8_t type, double length, double beam, double draft
 bool N2kAISTarget::copyTrimmed(char* dest, const char* src, size_t size) {
     bool bIsTruncated = strlcpy(dest, src, size) >= size;
 
-    if (!bIsTruncated) {
-        size_t l = strlen(dest);
-        while (l > 0 && dest[l - 1] == ' ') {
-            dest[--l] = '\0';
-        }
+    size_t l = strlen(dest);
+    while (l > 0 && dest[l - 1] == ' ') {
+        dest[--l] = '\0';
     }
+
     return bIsTruncated;
 }
 
