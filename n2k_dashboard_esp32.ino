@@ -12,6 +12,7 @@
 #define TESTING
 
 #include <limits>
+#include <memory>
 #include <list>
 #include <Preferences.h>     // For persistent storage of log data
 #include <Adafruit_GFX.h>    // Core graphics library
@@ -37,6 +38,11 @@
 #define VERSION_NUM      "v1.0.2"
 #define UPDATE_INTERVAL  1
 #define AIS_TIMEOUT      60
+
+// Modify this value based on the region of operation.
+// A feature enhancement would be to allow this to be adjusted dynamically and
+// then saved as a preference.
+#define DEFAULT_MAGNETIC_VARIATION (-14.0)  // Variation for Boston, MA in 2025.
 
 // Interval that min/max data is sampled.
 #define HISTORY_SAMPLE_INTERVAL_MS          1000
@@ -142,7 +148,7 @@ N2kVector g_appWind;        // Degrees, knots
 N2kVector g_trueWind;       // Degrees, knots
 
 // AIS state
-std::list<N2kAISTarget *> g_targets;
+std::list<std::unique_ptr<N2kAISTarget>> g_targets;
 uint32_t g_selTarget = 0;   // MMSI of selected AIS target
 
 // UI buttons. On the Adafruit ESP32-S3 reverse TFT feather, these are on pins 0, 1 and 2.
@@ -164,8 +170,8 @@ MinMaxDataHistory<double> g_twsHistory;
 MinMaxDataHistory<double> g_sogHistory;
 MinMaxDataHistory<double> g_depthHistory;
 
-// Time since last display update in millis.
-uint16_t g_lastUpdate = 0;
+// Time since last display update in seconds.
+time_t g_lastUpdate = 0;
 
 // String just containing the degree symbol from the codepage 437 character set.
 static const char g_degStr[] = { 0xf8, '\0' };
@@ -362,20 +368,8 @@ void handlePageButtonEvents(Event e) {
                     switch (e) {
                         case EVT_D0_PRESS:
                             // Cycle forward through targets
-                            for (auto t : g_targets) {
-                                if (!isVisibleTarget(t, g_page)) {
-                                    continue;
-                                }
-                                if (g_selTarget == 0 || (last && last->getMmsi() == g_selTarget)) {
-                                    // Select next target
-                                    setTarget(t);
-                                    bNeedUpdate = true;
-                                    goto done;
-                                }
-                                last = t;
-                            }
-                            // If no match (last target was selected), select none.
-                            setTarget(nullptr);
+                            setTarget(cycleAisTarget(g_targets, g_selTarget, g_page));
+                            bNeedUpdate = true;
                             break;
 
                         case EVT_D1_PRESS:
@@ -439,20 +433,8 @@ void handleSubpageButtonEvents(Event e) {
                 switch (e) {
                     // Show info for the next visible target on the parent AIS page.
                     case EVT_D0_PRESS:
-                        for (auto t : g_targets) {
-                            if (!isVisibleTarget(t, g_page)) {
-                                continue;
-                            }
-                            if (g_selTarget == 0 || (last && last->getMmsi() == g_selTarget)) {
-                                // Select next target
-                                setTarget(t);
-                                bNeedUpdate = true;
-                                goto done;
-                            }
-                            last = t;
-                        }
-                        // If no match (last target was selected), select none.
-                        setTarget(nullptr);
+                        setTarget(cycleAisTarget(g_targets, g_selTarget, g_page));
+                        bNeedUpdate = true;
                         break;
 
                     default:
@@ -472,6 +454,24 @@ done:
     }
 }
 
+const N2kAISTarget* cycleAisTarget(const std::list<std::unique_ptr<N2kAISTarget>>& targets,
+                                   uint32_t selMmsi, Page page) {
+    const N2kAISTarget* last = nullptr;
+
+    for (auto& t : targets) {
+        if (!isVisibleTarget(t.get(), page)) {
+            continue;
+        }
+
+        if (selMmsi == 0 || (last && last->getMmsi() == selMmsi)) {
+            return t.get();
+        }
+        last = t.get();
+    }
+
+    return nullptr;
+}
+
 // Time-based refresh of our data model. This may update the display based on
 // what changes.
 bool updateCallback(void* user) {
@@ -486,7 +486,6 @@ bool updateCallback(void* user) {
             if ((*t)->getMmsi() == g_selTarget) {
                 setTarget(nullptr);
             }
-            free(*t);
             t = g_targets.erase(t);
             bChanged = true;
         }
@@ -943,15 +942,15 @@ void displayPageAis(Page pg, time_t now) {
     if (g_bPosValid) {
         const N2kAISTarget* target = nullptr;
 
-        for (auto t : g_targets) {
-            if (!isVisibleTarget(t, g_page)) {
+        for (auto& t : g_targets) {
+            if (!isVisibleTarget(t.get(), g_page)) {
                 continue;
             }
 
             // Keep a pointer to the selected target and handle it later. We
             // draw it last so it's on top and stays visible.
             if (t->getMmsi() == g_selTarget) {
-                target = t;
+                target = t.get();
                 continue;
             }
 
@@ -1011,15 +1010,14 @@ void displayPageAis(Page pg, time_t now) {
 // Fetch the existing N2kAISTarget object for the specified MMSI, or allocate a
 // new object.
 N2kAISTarget* getAISTarget(uint32_t mmsi) {
-    for (auto t : g_targets) {
+    for (auto& t : g_targets) {
         if (t->getMmsi() == mmsi) {
-            return t;
+            return t.get();
         }
     }
 
-    N2kAISTarget* t = new N2kAISTarget(mmsi);
-    g_targets.push_back(t);
-    return t;
+    g_targets.push_back(std::make_unique<N2kAISTarget>(mmsi));
+    return g_targets.back().get();
 }
 
 // Set which AIS target is currently selected.
@@ -1075,8 +1073,8 @@ void displaySubpageAisInfo() {
     g_tft.fillScreen(ST77XX_BLACK);
 
     if (g_bPosValid) {
-        for (auto t : g_targets) {
-            if (!isVisibleTarget(t, g_page)) {
+        for (auto& t : g_targets) {
+            if (!isVisibleTarget(t.get(), g_page)) {
                 continue;
             }
 
@@ -1187,7 +1185,7 @@ void handlePgn128267Msg(const tN2kMsg &N2kMsg) {
     double val1, val2;
 
     if (ParseN2kWaterDepth(N2kMsg, sid, val1, val2)) {
-        if (val1 != N2kDoubleNA && val2 != N2kDoubleNA) {
+        if (!N2kIsNA(val1) && !N2kIsNA(val2)) {
             g_depth = meters2Ft(val1 + val2);
         }
     }
@@ -1198,7 +1196,7 @@ void handlePgn129025Msg(const tN2kMsg &N2kMsg) {
     double val1, val2;
 
     if (ParseN2kPositionRapid(N2kMsg, val1, val2)) {
-        if (val1 != N2kDoubleNA && val2 != N2kDoubleNA) {
+        if (!N2kIsNA(val1) && !N2kIsNA(val2)) {
             g_localPos.set(val1, val2);
 
             bool bIsFirstPos = !g_bPosValid;
@@ -1208,7 +1206,7 @@ void handlePgn129025Msg(const tN2kMsg &N2kMsg) {
             // If this is the first time we've received our position, update the CPA
             // of all AIS targets.
             if (bIsFirstPos) {
-                for (auto t : g_targets) {
+                for (auto& t : g_targets) {
                     t->calcCpa(g_localPos, g_localVelocity);
                 }
             }
@@ -1223,7 +1221,7 @@ void handlePgn129026Msg(const tN2kMsg &N2kMsg) {
     tN2kHeadingReference ref;
 
     if (ParseN2kCOGSOGRapid(N2kMsg, sid, ref, val1, val2)) {
-        if (ref == 0 && val1 != N2kDoubleNA && val2 != N2kDoubleNA) {
+        if (ref == 0 && !N2kIsNA(val1) && !N2kIsNA(val2)) {
 #ifdef TESTING
             static double fake_sog = 2.0;
             fake_sog += 0.25 - 0.5 * rand() / RAND_MAX;
@@ -1384,10 +1382,10 @@ void handlePgn130306Msg(const tN2kMsg &N2kMsg) {
     tN2kWindReference ref2;
 
     if (ParseN2kWindSpeed(N2kMsg, sid, val1, val2, ref2)) {
-        if (ref2 == N2kWind_Apparent && val1 != N2kDoubleNA && val2 != N2kDoubleNA) {
+        if (ref2 == N2kWind_Apparent && !N2kIsNA(val1) && !N2kIsNA(val2)) {
 #ifdef TESTING
             static double fake_aws = 2.0;
-            fake_aws += 0.5 - (double)rand()/ RAND_MAX;
+            fake_aws += 0.5 - (double)rand() / RAND_MAX;
             fake_aws = std::min(6.0, fake_aws);
             fake_aws = std::max(1.0, fake_aws);
             val1 += fake_aws;
@@ -1410,13 +1408,13 @@ void handlePgn127250Msg(const tN2kMsg &N2kMsg) {
     tN2kHeadingReference ref;
 
     if (ParseN2kHeading(N2kMsg, sid, heading, deviation, variation, ref)) {
-        if (heading != N2kDoubleNA) {
+        if (!N2kIsNA(heading)) {
             if (ref == N2khr_magnetic) {
-                if (variation == N2kDoubleNA) {
-                    // If variation is unknown use variation for Boston, MA in 2025.
-                    variation = deg2Rad(-14.0);
+                if (N2kIsNA(variation)) {
+                    // If variation is unknown use a hardcoded value.
+                    variation = deg2Rad(DEFAULT_MAGNETIC_VARIATION);
                 }
-                if (deviation == N2kDoubleNA) {
+                if (N2kIsNA(deviation)) {
                     deviation = 0.0;
                 }
                 g_hdg = normalizeBearing(rad2Deg(heading + deviation + variation));

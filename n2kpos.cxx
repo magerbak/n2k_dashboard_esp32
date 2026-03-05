@@ -1,6 +1,5 @@
 #include <cmath>
 #include <stdio.h>
-#include <assert.h>
 
 #include "n2kpos.h"
 #include "n2kunits.h"
@@ -9,8 +8,16 @@ N2kPos::N2kPos(double Lat, double Lon) :
     m_lat(Lat),
     m_lon(Lon)
 {
-    assert(m_lat <= 90.0 && m_lat >= -90.0);
-    assert(m_lon <= 180.0 && m_lon > -180.0);
+}
+
+bool N2kPos::set(double Lat, double Lon)
+{
+    if (Lat < -90.0 || Lat > 90.0 || Lon <= -180.0 || Lon > 180.0) {
+        return false;
+    }
+    m_lat = Lat;
+    m_lon = Lon;
+    return true;
 }
 
 const N2kVector N2kPos::getRelDistance(const N2kPos &Ref) const

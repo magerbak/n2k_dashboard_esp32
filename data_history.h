@@ -1,6 +1,6 @@
 #pragma once
 
-// Stores a rolling history of minimum and maximum data values of type T.
+// Stores a rolling history of minimum and maximum data values of numeric type T.
 //
 // To be memory efficient, the design anticipates a use-case where we track
 // the minimum and maximum value for some interval and then record a history of
