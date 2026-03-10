@@ -5,6 +5,7 @@
 #include <cmath>
 
 #include "n2kaistarget.h"
+#include "n2kunits.h"
 
 N2kAISTarget::N2kAISTarget(uint32_t mmsi) :
     m_mmsi(mmsi)
@@ -32,9 +33,9 @@ void N2kAISTarget::update(uint8_t type, double length, double beam, double draft
                           const char* callsign, const char* name, const char* dest)
 {
     m_type = type;
-    m_length = length;
-    m_beam = beam;
-    m_draft = draft;
+    m_length = meters2Ft(length);
+    m_beam = meters2Ft(beam);
+    m_draft = meters2Ft(draft);
 
     if (callsign) {
         copyTrimmed(m_callsign, callsign, sizeof(m_callsign));
