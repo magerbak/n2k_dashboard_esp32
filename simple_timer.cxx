@@ -21,14 +21,30 @@ void SimpleTimer::cancel()
     m_start = 0;
 }
 
+void SimpleTimer::setInterval(uint32_t interval) {
+    m_interval = interval;
+}
+
+uint32_t SimpleTimer::getRemaining() const {
+    uint32_t t = millis();
+
+    if (t < m_start + m_interval) {
+        return m_start + m_interval - t;
+    }
+
+    return 0;
+}
+
 
 void SimpleTimer::tick(uint32_t millis)
 {
+    uint32_t next_start = m_start + m_interval;
+
     if (m_callback && millis - m_start >= m_interval) {
         bool bContinue = (*m_callback)(m_user);
 
         if (bContinue) {
-            m_start = millis;
+            m_start = next_start;
         }
         else {
             cancel();
