@@ -35,7 +35,7 @@
 #include "n2kunits.h"
 #include "n2kaistarget.h"
 
-#define VERSION_NUM      "v1.0.5"
+#define VERSION_NUM      "v1.0.6"
 #define UPDATE_INTERVAL  1
 #define AIS_TIMEOUT      60
 
@@ -355,6 +355,7 @@ void handlePageButtonEvents(Event e) {
                     default:
                         break;
                 }
+                break;
 
             case PAGE_AIS_12NM:
             case PAGE_AIS_6NM:
@@ -1380,7 +1381,7 @@ void handlePgn129033Msg(const tN2kMsg &N2kMsg) {
 
             if (!g_hourTimer.isEnabled()) {
                 int hrs = (int)trunc(secsSinceMidnight / 3600) + 1;
-                int remaining = 3600 * hrs - (int)trunc(secsSinceMidnight);
+                int remaining = 3600 * hrs - (int)trunc(secsSinceMidnight) + 1;
                 g_hourTimer.begin(&g_hourTimer, remaining * 1000, logEntryCallback);
             }
         }
