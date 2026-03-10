@@ -35,7 +35,7 @@
 #include "n2kunits.h"
 #include "n2kaistarget.h"
 
-#define VERSION_NUM      "v1.0.3"
+#define VERSION_NUM      "v1.0.4"
 #define UPDATE_INTERVAL  1
 #define AIS_TIMEOUT      60
 
@@ -63,6 +63,8 @@ tNMEA2000 &g_NMEA2000=*(new tNMEA2000_esp32());
 #define DISPLAY_WIDTH   240
 #define DISPLAY_HEIGHT  135
 
+#define NUM_LOG_ENTRIES 4
+
 // Display page
 enum Page {
     PAGE_WIND,
@@ -76,12 +78,17 @@ enum Page {
 enum Subpage {
     SUBPAGE_NONE,
 
+    // Wind supbages
     SUBPAGE_HIST_AWS,
     SUBPAGE_HIST_TWS,
     SUBPAGE_HIST_SOG,
     SUBPAGE_HIST_DEPTH,
     SUBPAGE_HIST_SEPARATOR,
 
+    // Position subpages
+    SUBPAGE_POS_LOG,
+
+    // AIS subpages
     SUBPAGE_AIS_INFO,
 } g_subpage = SUBPAGE_NONE;
 
@@ -124,9 +131,22 @@ struct HistStatsContext {
     double avg = 0.0;
 };
 
+// Trip log
 struct LogData {
     uint32_t duration;
     float distance;
+};
+
+struct LogEntry {
+    bool bInUse;
+
+    uint16_t timestamp;     // minutes since midnight
+    int16_t tzOffset;       // timezone offset or 0 if unknown.
+
+    N2kPos position;
+    N2kVector velocity;
+    N2kVector appWind;
+    LogData logData;
 };
 
 // Use dedicated hardware SPI pins
@@ -137,6 +157,14 @@ Preferences g_prefs;
 LogData g_tripLog;          // Duration and distance of current trip
 bool g_tripResetConfirmation = false;
 N2kPos g_lastPos;           // Lat/Long of last log sample
+
+LogEntry g_logEntries[NUM_LOG_ENTRIES];
+unsigned int g_logEntryIndex;   // Index of next entry to store.
+unsigned int g_selLogEntry; // Reverse index of displayed entry
+
+uint16_t g_date;            // Days since 1/1/1970
+double g_secsSinceMidnight; // Seconds since midnight
+int16_t g_tzOffset;         // Timezone offset in minutes, if known
 
 bool g_bPosValid = false;
 N2kPos g_localPos;          // Latitude and Longitude
@@ -159,11 +187,14 @@ DebouncedButton g_buttonD2(2);
 // 1s timer for refreshing data model (ageing out AIS targets, sampling data history).
 SimpleTimer g_updateTimer;
 
-// 60s timer interval for recording aggregate min/max history and log data.
+// 60s timer for recording aggregate min/max history and log data.
 SimpleTimer g_historyTimer;
 
-// 10min timer to save log data
-SimpleTimer g_logTimer;
+// 10min timer to save trip log data
+SimpleTimer g_tripLogTimer;
+
+// Timer for recording on-the-hour log entries
+SimpleTimer g_hourTimer;
 
 MinMaxDataHistory<double> g_awsHistory;
 MinMaxDataHistory<double> g_twsHistory;
@@ -175,46 +206,6 @@ time_t g_lastUpdate = 0;
 
 // String just containing the degree symbol from the codepage 437 character set.
 static const char g_degStr[] = { 0xf8, '\0' };
-
-void handleButtonEvents(Event e);
-void handlePageButtonEvents(Event e);
-void handleSubpageButtonEvents(Event e);
-
-void displaySplashScreen();
-void drawJustifiedText(const char* str, int x, int y, TextLayout fmt);
-void drawJustifiedVal(double val, int precision, const char* suffix, int x, int y, TextLayout fmt);
-
-void displayPageWind();
-void drawRadial(int x0,  int y0,  int r, int bearing, int len, uint16_t color);
-void statsHistoryCallback(void* user, const double* dataMin, const double* dataMax,
-                          size_t len, size_t offset);
-void drawHistoryCallback(void* user, const double* dataMin, const double* dataMax,
-                         size_t len, size_t offset);
-void displaySubpageHistory(const char* title, const MinMaxDataHistory<double>* hist, uint16_t color);
-
-void displayPagePosition();
-
-void displayPageAis(Page pg, time_t now);
-N2kAISTarget* getAISTarget(uint32_t mmsi);
-void setTarget(const N2kAISTarget* p);
-bool isVisibleTarget(const N2kAISTarget* t, Page pg);
-bool isDangerousTarget(double d, double t);
-void displaySubpageAisInfo();
-
-void displayUpdate(bool bForce);
-
-void handlePgn128267Msg(const tN2kMsg &N2kMsg);
-void handlePgn129025Msg(const tN2kMsg &N2kMsg);
-void handlePgn129026Msg(const tN2kMsg &N2kMsg);
-void handlePgn129038Msg(const tN2kMsg &N2kMsg);
-void handlePgn129039Msg(const tN2kMsg &N2kMsg);
-void handlePgn129794Msg(const tN2kMsg &N2kMsg);
-void handlePgn129809Msg(const tN2kMsg &N2kMsg);
-void handlePgn129810Msg(const tN2kMsg &N2kMsg);
-void handlePgn130306Msg(const tN2kMsg &N2kMsg);
-void handlePgn127250Msg(const tN2kMsg &N2kMsg);
-
-void handleNMEA2000Msg(const tN2kMsg &N2kMsg);
 
 
 void setup(void) {
@@ -239,7 +230,7 @@ void setup(void) {
 
   g_updateTimer.begin(nullptr, HISTORY_SAMPLE_INTERVAL_MS, updateCallback);
   g_historyTimer.begin(nullptr, HISTORY_AGGREGATION_INTERVAL_MS, historyCallback);
-  g_logTimer.begin(nullptr, LOG_SAVE_INTERVAL_MS, logCallback);
+  g_tripLogTimer.begin(nullptr, LOG_SAVE_INTERVAL_MS, logCallback);
 
   // Record history of AWS, TWS and SOG for last 60mins.
   g_awsHistory.begin(60);
@@ -279,7 +270,8 @@ void loop() {
     // Drive our timers
     g_updateTimer.tick(t);
     g_historyTimer.tick(t);
-    g_logTimer.tick(t);
+    g_tripLogTimer.tick(t);
+    g_hourTimer.tick(t);
 
     // Poll buttons and drive UI
     if (g_buttonD0.updateState()) {
@@ -350,11 +342,14 @@ void handlePageButtonEvents(Event e) {
                         else {
                             g_tripResetConfirmation = true;
                         }
+                        bNeedUpdate = true;
                         break;
 
                     case EVT_D1_PRESS:
-                    case EVT_D2_PRESS:
                         g_tripResetConfirmation = false;
+                        g_selLogEntry = 0;
+                        g_subpage = SUBPAGE_POS_LOG;
+                        bNeedUpdate = true;
                         break;
 
                     default:
@@ -401,6 +396,7 @@ void handleSubpageButtonEvents(Event e) {
     const N2kAISTarget* last = nullptr;
     bool bNeedUpdate = false;
     int p;
+    unsigned int ix;
 
     // For all subpages, D1 exits back to parent top-level page.
     if (e == EVT_D1_PRESS) {
@@ -421,6 +417,23 @@ void handleSubpageButtonEvents(Event e) {
                             p = SUBPAGE_HIST_AWS;
                         }
                         g_subpage = (Subpage)p;
+                        bNeedUpdate = true;
+                        break;
+
+                    default:
+                        break;
+                }
+                break;
+
+            case SUBPAGE_POS_LOG:
+                switch (e) {
+                    // Cycle through log entries
+                    case EVT_D0_PRESS:
+                        ix = (g_selLogEntry + 1) % NUM_LOG_ENTRIES;
+                        if (g_logEntries[ix].bInUse == false) {
+                            ix = 0;
+                        }
+                        g_selLogEntry = ix;
                         bNeedUpdate = true;
                         break;
 
@@ -540,6 +553,19 @@ bool logCallback(void* user) {
     g_prefs.putFloat("tripLogDist", g_tripLog.distance);
 
     // Continue running
+    return true;
+}
+
+bool logEntryCallback(void* user) {
+    // Snapshot logbook entry data on the hour
+    addLogEntry((unsigned int)g_secsSinceMidnight / 60, g_tzOffset, &g_localPos,
+                    &g_localVelocity, &g_appWind, &g_tripLog);
+
+    // Make sure next interval is 1hr because the first time it is not.
+    SimpleTimer* t = (SimpleTimer*)user;
+    if (t) {
+        t->setInterval(3600 * 1000);
+    }
     return true;
 }
 
@@ -823,7 +849,7 @@ void displaySubpageHistory(const char* title, const MinMaxDataHistory<double>* h
 //
 // Position info top-level page.
 //
-// This page is intended to provide essential textyak info for making
+// This page is intended to provide essential info for making VHF calls or
 // logbook entries.
 //
 void displayPagePosition() {
@@ -871,16 +897,16 @@ void displayPagePosition() {
     // Apparent wind angle and speed in red
     g_tft.setTextColor(ST77XX_RED);
     buffer[0] = '\0';
-    snprintf(buffer, sizeof(buffer), "AWA %.0f%s %.0fkts",
-             g_appWind.getSignedBearing(), g_degStr, g_appWind.getMagnitude());
+    snprintf(buffer, sizeof(buffer), "AWS %.0fkts AWA %.0f%s",
+             g_appWind.getMagnitude(), g_appWind.getSignedBearing(), g_degStr);
     g_tft.println(buffer);
 
     // True wind direction and speed in blue
     g_tft.setTextColor(ST77XX_BLUE);
     double twd = normalizeBearing(g_hdg + g_trueWind.getSignedBearing());
     buffer[0] = '\0';
-    snprintf(buffer, sizeof(buffer), "TWD %.0f%s %.0fkts",
-             twd, g_degStr, g_trueWind.getMagnitude());
+    snprintf(buffer, sizeof(buffer), "TWS %.0fkts TWD %.0f%s",
+             g_trueWind.getMagnitude(), twd, g_degStr);
     g_tft.println(buffer);
 
     // Trip data in yellow
@@ -895,6 +921,104 @@ void displayPagePosition() {
                  g_tripLog.duration / 3600, (g_tripLog.duration % 3600) / 60);
     }
     g_tft.println(buffer);
+}
+
+// Snapshots a new on-the-hour log entry.
+bool addLogEntry(uint16_t timestamp, int16_t tzOffset,
+                 const N2kPos* pos, const N2kVector* vel,  const N2kVector* appWind,
+                 const LogData* log) {
+    g_logEntries[g_logEntryIndex].bInUse = true;
+
+    g_logEntries[g_logEntryIndex].timestamp = timestamp; // Minutes since midnight
+    g_logEntries[g_logEntryIndex].tzOffset = tzOffset;   // Timezone offset in minutes
+    g_logEntries[g_logEntryIndex].position = *pos;
+    g_logEntries[g_logEntryIndex].velocity = *vel;
+    g_logEntries[g_logEntryIndex].appWind = *appWind;
+    g_logEntries[g_logEntryIndex].logData = *log;
+
+    g_logEntryIndex = (g_logEntryIndex + 1) % NUM_LOG_ENTRIES;
+
+    return true;
+}
+
+// Returns pointer to nth log entry in the past (0 represents the most recent).
+const LogEntry* getLogEntry(unsigned int n) {
+    unsigned int ix = (g_logEntryIndex + NUM_LOG_ENTRIES - (n + 1)) % NUM_LOG_ENTRIES;
+    if (g_logEntries[ix].bInUse) {
+        return &g_logEntries[ix];
+    }
+    return nullptr;
+}
+
+
+//
+// Log entry subpage.
+//
+// Displays current time and saved on-the-hour logbook data.
+// D0 cycles over the last 4 hours.
+//
+void displaySubpageLog() {
+    char buffer[128];
+    const LogEntry* ent;
+    unsigned int now;
+
+    g_tft.setTextWrap(false);
+    g_tft.fillScreen(ST77XX_BLACK);
+    g_tft.setCursor(0, 0);
+    g_tft.setTextSize(2);
+    g_tft.setTextColor(ST77XX_YELLOW);
+
+    // Current time
+    now = g_secsSinceMidnight;
+    if (g_tzOffset) {
+        now += g_tzOffset * 60;
+    }
+    snprintf(buffer, sizeof(buffer), "%02d:%02d:%02d %s\n",
+             now / 3600, (now % 3600) / 60, now % 60,
+             g_tzOffset ? "Local" : "UTC");
+    g_tft.println(buffer);
+
+    ent = getLogEntry(g_selLogEntry);
+
+    if (ent) {
+        if (ent->tzOffset) {
+            snprintf(buffer, sizeof(buffer), "%02d:%02d Local",
+                     (ent->timestamp + ent->tzOffset) / 60,
+                     (ent->timestamp + ent->tzOffset) % 60);
+        }
+        else {
+            snprintf(buffer, sizeof(buffer), "%02d:%02d UTC", ent->timestamp / 60,
+                     ent->timestamp % 60);
+        }
+        g_tft.println(buffer);
+
+        g_tft.setTextColor(ST77XX_WHITE);
+        buffer[0] = '\0';
+        ent->position.toString(buffer, sizeof(buffer), N2kPos::FMT_LAT_ONLY);
+        g_tft.println(buffer);
+        buffer[0] = '\0';
+        ent->position.toString(buffer, sizeof(buffer), N2kPos::FMT_LON_ONLY);
+        g_tft.println(buffer);
+
+        buffer[0] = '\0';
+        snprintf(buffer, sizeof(buffer), "SOG %.1fkts COG %.0f%s",
+                 ent->velocity.getMagnitude(),
+                 ent->velocity.getBearing(), g_degStr);
+        g_tft.println(buffer);
+
+        buffer[0] = '\0';
+        snprintf(buffer, sizeof(buffer), "AWS %.0fkts AWA %.0f%s",
+                 ent->appWind.getMagnitude(),
+                 ent->appWind.getSignedBearing(), g_degStr);
+        g_tft.println(buffer);
+
+        buffer[0] = '\0';
+        snprintf(buffer, sizeof(buffer), "LOG %.1fnm",
+                 round(g_tripLog.distance));
+    }
+    else {
+        g_tft.println("No log entries");
+    }
 }
 
 //
@@ -1170,6 +1294,10 @@ void displayUpdate(bool bForce) {
                 displaySubpageHistory("Depth", &g_depthHistory, ST77XX_GREEN);
                 break;
 
+            case SUBPAGE_POS_LOG:
+                displaySubpageLog();
+                break;
+
             case SUBPAGE_AIS_INFO:
                 displaySubpageAisInfo();
                 break;
@@ -1230,6 +1358,31 @@ void handlePgn129026Msg(const tN2kMsg &N2kMsg) {
             val2 += fake_sog;
 #endif
             g_localVelocity.set(metersPerSec2Kts(val2), rad2Deg(val1));
+        }
+    }
+}
+
+// PGN 129033 TimeDate 2025/11/5T14:33:01.234-04:00
+void handlePgn129033Msg(const tN2kMsg &N2kMsg) {
+    uint16_t date = 0;
+    double secsSinceMidnight = 0.0;
+    int16_t tzOffset = 0;
+
+    if (ParseN2kLocalOffset(N2kMsg, date, secsSinceMidnight, tzOffset)) {
+        if (date != 0xffff && !N2kIsNA(secsSinceMidnight)) {
+            g_date = date;
+            g_secsSinceMidnight = secsSinceMidnight;
+
+            if (tzOffset != 0x7fff) {
+                // TZ offset in minutes
+                g_tzOffset = tzOffset;
+            }
+
+            if (!g_hourTimer.isEnabled()) {
+                int hrs = (int)trunc(secsSinceMidnight / 3600) + 1;
+                int remaining = 3600 * hrs - (int)trunc(secsSinceMidnight);
+                g_hourTimer.begin(&g_hourTimer, remaining * 1000, logEntryCallback);
+            }
         }
     }
 }
@@ -1447,6 +1600,10 @@ void handleNMEA2000Msg(const tN2kMsg &N2kMsg) {
         handlePgn129026Msg(N2kMsg);
       break;
       
+    case 129033:
+        handlePgn129033Msg(N2kMsg);
+        break;
+
     case 129038:
         handlePgn129038Msg(N2kMsg);
         break;

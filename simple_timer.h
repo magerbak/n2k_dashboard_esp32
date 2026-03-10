@@ -11,6 +11,8 @@ public:
     ~SimpleTimer() = default;
 
     void begin(void* user,  uint32_t interval, SimpleTimerCallback callback);
+    void setInterval(uint32_t interval);
+    uint32_t getRemaining() const;
     void cancel();
 
     bool isEnabled() const { return m_callback != nullptr; }
