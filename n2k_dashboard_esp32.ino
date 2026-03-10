@@ -35,14 +35,13 @@
 #include "n2kunits.h"
 #include "n2kaistarget.h"
 
-#define VERSION_NUM      "v1.0.4"
+#define VERSION_NUM      "v1.0.5"
 #define UPDATE_INTERVAL  1
 #define AIS_TIMEOUT      60
 
+// Default magnetic variation, in case this is not provided from the network.
 // Modify this value based on the region of operation.
-// A feature enhancement would be to allow this to be adjusted dynamically and
-// then saved as a preference.
-#define DEFAULT_MAGNETIC_VARIATION (-14.0)  // Variation for Boston, MA in 2025.
+#define DEFAULT_MAGNETIC_VARIATION (-14.0 * (M_PI / 180.0))  // Variation for Boston, MA in 2025.
 
 // Interval that min/max data is sampled.
 #define HISTORY_SAMPLE_INTERVAL_MS          1000
@@ -170,6 +169,7 @@ bool g_bPosValid = false;
 N2kPos g_localPos;          // Latitude and Longitude
 N2kVector g_localVelocity;  // Boat COG (in degrees) and SOG (kts) as a vector
 double g_hdg = 0.0;         // degrees
+double g_variation = DEFAULT_MAGNETIC_VARIATION; // radians
 
 double g_depth = 0.0;       // ft
 N2kVector g_appWind;        // Degrees, knots
@@ -1562,10 +1562,12 @@ void handlePgn127250Msg(const tN2kMsg &N2kMsg) {
 
     if (ParseN2kHeading(N2kMsg, sid, heading, deviation, variation, ref)) {
         if (!N2kIsNA(heading)) {
+            // What to do about conflicting sources of heading info?
             if (ref == N2khr_magnetic) {
                 if (N2kIsNA(variation)) {
-                    // If variation is unknown use a hardcoded value.
-                    variation = deg2Rad(DEFAULT_MAGNETIC_VARIATION);
+                    variation = g_variation;
+                } else {
+                    g_variation = variation;
                 }
                 if (N2kIsNA(deviation)) {
                     deviation = 0.0;
@@ -1579,6 +1581,20 @@ void handlePgn127250Msg(const tN2kMsg &N2kMsg) {
     }
 }
 
+// PGN 127258: Variation -14.0
+void handlePgn127258Msg(const tN2kMsg &N2kMsg) {
+    unsigned char sid = 0;
+    tN2kMagneticVariation src;
+    uint16_t age = 0;
+    double variation = 0.0;
+
+    if (ParseN2kMagneticVariation(N2kMsg, sid, src, age, variation)) {
+        if (!N2kIsNA(variation)) {
+            g_variation = variation;
+        }
+    }
+}
+
 // Process incoming N2K messages to update our data model.
 void handleNMEA2000Msg(const tN2kMsg &N2kMsg) {
 
@@ -1586,6 +1602,10 @@ void handleNMEA2000Msg(const tN2kMsg &N2kMsg) {
     // Handle PGNs we are interested in
     case 127250:
         handlePgn127250Msg(N2kMsg);
+        break;
+
+    case 127258:
+        handlePgn127258Msg(N2kMsg);
         break;
 
     case 128267:
