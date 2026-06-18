@@ -9,7 +9,7 @@
   internal CAN controller (external transceiver required).
 
  **************************************************************************/
-//#define TESTING
+#define TESTING
 
 #include <limits>
 #include <memory>
@@ -35,7 +35,7 @@
 #include "n2kunits.h"
 #include "n2kaistarget.h"
 
-#define VERSION_NUM      "v1.0.6"
+#define VERSION_NUM      "v1.0.7"
 #define UPDATE_INTERVAL  1
 #define AIS_TIMEOUT      60
 
@@ -918,7 +918,7 @@ void displayPagePosition() {
     }
     else {
         snprintf(buffer, sizeof(buffer), "LOG %.1fnm %u:%02uhrs",
-                 round(g_tripLog.distance),
+                 g_tripLog.distance,
                  g_tripLog.duration / 3600, (g_tripLog.duration % 3600) / 60);
     }
     g_tft.println(buffer);
@@ -1015,7 +1015,7 @@ void displaySubpageLog() {
 
         buffer[0] = '\0';
         snprintf(buffer, sizeof(buffer), "LOG %.1fnm",
-                 round(g_tripLog.distance));
+                 g_tripLog.distance);
     }
     else {
         g_tft.println("No log entries");
@@ -1330,11 +1330,11 @@ void handlePgn129025Msg(const tN2kMsg &N2kMsg) {
 
             bool bIsFirstPos = !g_bPosValid;
             g_bPosValid = true;
-            g_lastPos = g_localPos;
 
             // If this is the first time we've received our position, update the CPA
             // of all AIS targets.
             if (bIsFirstPos) {
+                g_lastPos = g_localPos;
                 for (auto& t : g_targets) {
                     t->calcCpa(g_localPos, g_localVelocity);
                 }
@@ -1381,7 +1381,7 @@ void handlePgn129033Msg(const tN2kMsg &N2kMsg) {
 
             if (!g_hourTimer.isEnabled()) {
                 int hrs = (int)trunc(secsSinceMidnight / 3600) + 1;
-                int remaining = 3600 * hrs - (int)trunc(secsSinceMidnight) + 1;
+                int remaining = 3600 * hrs - (int)trunc(secsSinceMidnight) + 30;
                 g_hourTimer.begin(&g_hourTimer, remaining * 1000, logEntryCallback);
             }
         }
