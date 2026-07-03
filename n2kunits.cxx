@@ -27,7 +27,15 @@ double getSignedBearing(double bearing)
 // Normalizes bearing between 0...360.
 double normalizeBearing(double bearing)
 {
-    return bearing - (trunc(bearing / 360.0) * 360.0);
+    if (bearing >= 0.0 && bearing < 360.0) {
+        return bearing;
+    }
+
+    double b = bearing - (trunc(bearing / 360.0) * 360.0);
+    if (b < 0.0) {
+        b += 360.0;
+    }
+    return b;
 }
 
 double fixedFrac2Double(uint16_t x, double precision)
@@ -63,6 +71,17 @@ double metersPerSec2Kts(double spd)
     // 3600s = 1hr
     return spd * (3600.0 / 1852.0);
 }
+
+double celcius2Farenheit(double t)
+{
+    return t * 1.8 + 32.0;
+}
+
+double millibars2inHg(double mb)
+{
+    return mb * 0.029529971;
+}
+
 
 bool areFloatsEqual(double a, double b, double epsilon)
 {

@@ -10,7 +10,7 @@ N2kVector::N2kVector(double mag, double bearing)
 
 void N2kVector::set(double mag, double bearing)
 {
-    double rad = deg2Rad(bearing);
+    double rad = deg2Rad(normalizeBearing(bearing));
 
     m_mag = mag;
     m_bearing = bearing;
