@@ -1,15 +1,23 @@
 /**************************************************************************
   Monitors NMEA2000 bus and displays a simple dashboard of useful info.
 
+  v1.1 Added support for recording ambient temperature and pressure via a BMP580/BME280
+
   Works with the Adafruit ESP32-S3 Reverse TFT Feather
     ----> https://www.adafruit.com/products/5691
 
   Uses the Adafruit GFX library and the ST7789 display driver.
+  Optionally uses the Adafruit_BMP5xx/Adafruit_BME280 sensor library when defined.
   Uses the NEMA2000 library for parsing N2K communications using the ESP32
   internal CAN controller (external transceiver required).
 
  **************************************************************************/
 //#define TESTING
+
+//#define USE_METRIC  // Define to use m (depth), mbar (pressure), celcius (temp)
+
+//#define HAS_BMP580  // Temperature and pressure sensor
+//#define HAS_BME280  // Temperature, humidity and pressure sensor
 
 #include <limits>
 #include <memory>
@@ -17,6 +25,16 @@
 #include <Preferences.h>     // For persistent storage of log data
 #include <Adafruit_GFX.h>    // Core graphics library
 #include <Adafruit_ST7789.h> // Hardware-specific library for ST7789
+#ifdef HAS_BMP580
+#include "Adafruit_BMP5xx.h"
+#define HAS_ATM_PRESSURE
+#define HAS_ATM_TEMP
+#elif defined HAS_BME280
+#include "Adafruit_BME280.h"
+#define HAS_ATM_PRESSURE
+#define HAS_ATM_TEMP
+#define HAS_ATM_HUMIDITY
+#endif
 #include <SPI.h>
 
 #include "N2kMsg.h"
@@ -35,7 +53,7 @@
 #include "n2kunits.h"
 #include "n2kaistarget.h"
 
-#define VERSION_NUM      "v1.0.7"
+#define VERSION_NUM      "v1.1.0"
 #define UPDATE_INTERVAL  1
 #define AIS_TIMEOUT      60
 
@@ -143,13 +161,41 @@ struct LogEntry {
     int16_t tzOffset;       // timezone offset or 0 if unknown.
 
     N2kPos position;
+    double heading;
     N2kVector velocity;
     N2kVector appWind;
     LogData logData;
+    float atmPressure;
 };
 
 // Use dedicated hardware SPI pins
 Adafruit_ST7789 g_tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+#ifdef HAS_BMP580
+Adafruit_BMP5xx g_envSensor;
+#elif defined HAS_BME280
+Adafruit_BME280 g_envSensor;
+#endif
+#ifdef HAS_ATM_PRESSURE
+float g_envAtmPressure;
+#endif
+#ifdef HAS_ATM_TEMP
+float g_envAtmTemp;
+#endif
+#ifdef HAS_ATM_HUMIDITY
+float g_envAtmHumidity;
+#endif
+
+#ifdef USE_METRIC
+static const int g_precPressure = 0;
+static const char g_unitsPressure[] = "mb";
+static const char g_unitsTemp[] = { 0xf8, 'C', '\0' };
+static const char g_unitsDepth[] = "m";
+#else
+static const int g_precPressure = 2;
+static const char g_unitsPressure[] = { '"', '\0' };
+static const char g_unitsTemp[] = { 0xf8, 'F', '\0' };
+static const char g_unitsDepth[] = "ft";
+#endif
 
 // Log data
 Preferences g_prefs;
@@ -253,8 +299,29 @@ void setup(void) {
   g_tft.setRotation(3);
 
   displaySplashScreen();
+
+#ifdef HAS_BMP580
+  if (g_envSensor.begin(BMP5XX_ALTERNATIVE_ADDRESS, &Wire)) {
+      Serial.println(F("Detected BMP580 sensor"));
+      g_envSensor.setTemperatureOversampling(BMP5XX_OVERSAMPLING_2X);
+      g_envSensor.setPressureOversampling(BMP5XX_OVERSAMPLING_16X);
+      g_envSensor.setIIRFilterCoeff(BMP5XX_IIR_FILTER_COEFF_3);
+      g_envSensor.setOutputDataRate(BMP5XX_ODR_50_HZ);
+      g_envSensor.setPowerMode(BMP5XX_POWERMODE_NORMAL);
+      g_envSensor.enablePressure(true);
+      g_envSensor.configureInterrupt(BMP5XX_INTERRUPT_LATCHED,
+                                     BMP5XX_INTERRUPT_ACTIVE_HIGH,
+                                     BMP5XX_INTERRUPT_PUSH_PULL, BMP5XX_INTERRUPT_DATA_READY, true);
+  }
+#elif defined HAS_BME280
+  if (g_envSensor.begin()) {
+      Serial.println(F("Detected BME280 sensor"));
+  }
+#endif
+
   delay(1000);
-  Serial.println(F("TFT Initialized"));
+
+  readEnvironmentalSensors();
 
   //NMEA2000.SetN2kCANMsgBufSize(8);
   //NMEA2000.SetN2kCANReceiveFrameBufSize(100);
@@ -541,11 +608,44 @@ bool historyCallback(void* user) {
         g_lastPos = g_localPos;
     }
 
+    // Sample environment sensors at the same time.
+    readEnvironmentalSensors();
+
     // Force a display refresh every so often even if we're not receiving data
     displayUpdate(true);
 
     // Continue running
     return true;
+}
+
+void readEnvironmentalSensors() {
+#if (defined HAS_BMP580)
+    if (g_envSensor.dataReady() && g_envSensor.performReading()) {
+#ifdef USE_METRIC
+        // Leave pressure in millibars
+        g_envAtmPressure = g_envSensor.pressure;
+#else
+        // Convert to inHg
+        g_envAtmPressure = millibars2inHg(g_envSensor.pressure);
+#endif
+#ifdef USE_METRIC
+        // Leave temp in Celcius
+        g_envAtmTemp = g_envSensor.temperature;
+#else
+        // Convert temp to Farenheit.
+        g_envAtmTemp = celcius2Farenheit(g_envSensor.temperature);
+#endif
+    }
+#elif (defined HAS_BME280)
+#ifdef USE_METRIC
+    g_envAtmPressure = g_envSensor.readPressure() / 100.0;
+    g_envAtmTemp = g_envSensor.readTemperature();
+#else
+    g_envAtmPressure = millibars2inHg(g_envSensor.readPressure() / 100.0);
+    g_envAtmTemp = celcius2Farenheit(g_envSensor.readTemperature());
+#endif
+    g_envAtmHumidity = g_envSensor.readHumidity();
+#endif
 }
 
 bool logCallback(void* user) {
@@ -559,8 +659,7 @@ bool logCallback(void* user) {
 
 bool logEntryCallback(void* user) {
     // Snapshot logbook entry data on the hour
-    addLogEntry((unsigned int)g_secsSinceMidnight / 60, g_tzOffset, &g_localPos,
-                    &g_localVelocity, &g_appWind, &g_tripLog);
+    addLogEntry();
 
     // Make sure next interval is 1hr because the first time it is not.
     SimpleTimer* t = (SimpleTimer*)user;
@@ -715,12 +814,12 @@ void displayPageWind() {
     drawJustifiedVal(g_localVelocity.getBearing(), 0, g_degStr, x0, y0 + 5, TXT_CENTERED);
 
     // Depth to right of dial
-    int precision = g_depth > 100.0 ? 0 : 1;
+    int precision = g_depth >= 100.0 ? 0 : 1;
     g_tft.setTextColor(ST77XX_GREEN);
     g_tft.setTextSize(2);
     drawJustifiedVal(g_depth, precision, nullptr, DISPLAY_WIDTH, 70, TXT_JUSTIFIED);
     g_tft.setTextSize(1);
-    drawJustifiedText("ft", DISPLAY_WIDTH, 78, TXT_JUSTIFIED);
+    drawJustifiedText(g_unitsDepth, DISPLAY_WIDTH, 78, TXT_JUSTIFIED);
 }
 
 // Helper function to draw a partial radial of a circle of radius r at x0, y0.
@@ -855,16 +954,49 @@ void displaySubpageHistory(const char* title, const MinMaxDataHistory<double>* h
 //
 void displayPagePosition() {
     char buffer[128];
+    unsigned int now;
 
     g_tft.setTextWrap(false);
     g_tft.fillScreen(ST77XX_BLACK);
     g_tft.setCursor(0, 0);
+    g_tft.setTextSize(2);
 
-    // Local boat info in yellow
-    g_tft.setTextColor(ST77XX_YELLOW);
-    g_tft.setTextSize(3);
+    g_tft.setTextColor(ST77XX_WHITE);
 
-    // Position first in large font.
+    // Current time
+    now = g_secsSinceMidnight;
+    if (g_tzOffset) {
+        now += g_tzOffset * 60;
+    }
+    snprintf(buffer, sizeof(buffer), "%02d:%02d:%02d %s",
+             now / 3600, (now % 3600) / 60, now % 60,
+             g_tzOffset ? "LOC" : "UTC");
+    g_tft.println(buffer);
+
+    // Atmospheric data in top-right
+#ifdef HAS_ATM_PRESSURE
+    buffer[0] = '\0';
+    snprintf(buffer, sizeof(buffer), "%.*f%s", g_precPressure, g_envAtmPressure,
+             g_unitsPressure);
+    drawJustifiedText(buffer, DISPLAY_WIDTH, 0, TXT_JUSTIFIED);
+#endif
+#ifdef HAS_ATM_TEMP
+    buffer[0] = '\0';
+    snprintf(buffer, sizeof(buffer), "%.0f%s", g_envAtmTemp, g_unitsTemp);
+    drawJustifiedText(buffer, DISPLAY_WIDTH, 32, TXT_JUSTIFIED);
+#endif
+#ifdef HAS_ATM_HUMIDITY
+    buffer[0] = '\0';
+    snprintf(buffer, sizeof(buffer), "%.0f%%", g_envAtmHumidity);
+    drawJustifiedText(buffer, DISPLAY_WIDTH, 48, TXT_JUSTIFIED);
+#endif
+
+    // Position in cyan
+    g_tft.setTextColor(ST77XX_CYAN);
+    // Add a small gap for improved readability
+    g_tft.setCursor(0, 21);
+
+    // GPS Position
     if (g_bPosValid) {
         buffer[0] = '\0';
         g_localPos.toString(buffer, sizeof(buffer), N2kPos::FMT_LAT_ONLY);
@@ -874,9 +1006,22 @@ void displayPagePosition() {
         g_tft.println(buffer);
     }
 
-    g_tft.setCursor(0, 55);
-    g_tft.setTextSize(2);
+    // Add a small gap for improved readability
+    g_tft.setCursor(0, 56);
 
+    // Trip data
+    buffer[0] = '\0';
+    if (g_tripResetConfirmation) {
+        snprintf(buffer, sizeof(buffer), "Press again to RESET");
+    }
+    else {
+        snprintf(buffer, sizeof(buffer), "LOG %.1fnm %u:%02uhrs",
+                 g_tripLog.distance,
+                 g_tripLog.duration / 3600, (g_tripLog.duration % 3600) / 60);
+    }
+    g_tft.println(buffer);
+
+    g_tft.setTextColor(ST77XX_YELLOW);
     // Heading and course
     buffer[0] = '\0';
     snprintf(buffer, sizeof(buffer), "HDG %.0f%s COG %.0f%s",
@@ -904,38 +1049,128 @@ void displayPagePosition() {
 
     // True wind direction and speed in blue
     g_tft.setTextColor(ST77XX_BLUE);
-    double twd = normalizeBearing(g_hdg + g_trueWind.getSignedBearing());
+    N2kVector trueWind;
+    trueWind = calcTrueWind(&g_appWind, g_localVelocity.getMagnitude(), g_hdg);
     buffer[0] = '\0';
     snprintf(buffer, sizeof(buffer), "TWS %.0fkts TWD %.0f%s",
-             g_trueWind.getMagnitude(), twd, g_degStr);
-    g_tft.println(buffer);
-
-    // Trip data in yellow
-    g_tft.setTextColor(ST77XX_YELLOW);
-    buffer[0] = '\0';
-    if (g_tripResetConfirmation) {
-        snprintf(buffer, sizeof(buffer), "Press again to RESET");
-    }
-    else {
-        snprintf(buffer, sizeof(buffer), "LOG %.1fnm %u:%02uhrs",
-                 g_tripLog.distance,
-                 g_tripLog.duration / 3600, (g_tripLog.duration % 3600) / 60);
-    }
+             trueWind.getMagnitude(), trueWind.getBearing(), g_degStr);
     g_tft.println(buffer);
 }
 
+//
+// Log entry subpage.
+//
+// Displays saved on-the-hour logbook data.
+// D0 cycles over the last 4 hours.
+//
+void displaySubpageLog() {
+    char buffer[128];
+    const LogEntry* ent;
+
+    g_tft.setTextWrap(false);
+    g_tft.fillScreen(ST77XX_BLACK);
+    g_tft.setCursor(0, 0);
+    g_tft.setTextSize(2);
+    g_tft.setTextColor(ST77XX_YELLOW);
+
+    ent = getLogEntry(g_selLogEntry);
+
+    if (ent) {
+        if (ent->tzOffset) {
+            snprintf(buffer, sizeof(buffer), "%02d:%02d LOC",
+                     (ent->timestamp + ent->tzOffset) / 60,
+                     (ent->timestamp + ent->tzOffset) % 60);
+        }
+        else {
+            snprintf(buffer, sizeof(buffer), "%02d:%02d UTC", ent->timestamp / 60,
+                     ent->timestamp % 60);
+        }
+        g_tft.println(buffer);
+
+        // Add a small gap for improved readability
+        g_tft.setCursor(0, 21);
+        g_tft.setTextColor(ST77XX_WHITE);
+        buffer[0] = '\0';
+        ent->position.toString(buffer, sizeof(buffer), N2kPos::FMT_LAT_ONLY);
+        g_tft.println(buffer);
+        buffer[0] = '\0';
+        ent->position.toString(buffer, sizeof(buffer), N2kPos::FMT_LON_ONLY);
+        g_tft.println(buffer);
+
+        // Add a small gap for improved readability
+        g_tft.setCursor(0, 56);
+
+        buffer[0] = '\0';
+#ifdef HAS_ATM_PRESSURE
+        snprintf(buffer, sizeof(buffer), "LOG %.1fnm %.*f%s",
+                 ent->logData.distance, g_precPressure, ent->atmPressure, g_unitsPressure);
+#else
+        snprintf(buffer, sizeof(buffer), "LOG %.1fnm",
+                 ent->logData.distance);
+#endif
+        g_tft.println(buffer);
+
+        buffer[0] = '\0';
+        snprintf(buffer, sizeof(buffer), "SOG %.1fkts COG %.0f%s",
+                 ent->velocity.getMagnitude(),
+                 ent->velocity.getBearing(), g_degStr);
+        g_tft.println(buffer);
+
+        buffer[0] = '\0';
+        snprintf(buffer, sizeof(buffer), "AWS %.0fkts AWA %.0f%s",
+                 ent->appWind.getMagnitude(),
+                 ent->appWind.getSignedBearing(), g_degStr);
+        g_tft.println(buffer);
+
+        N2kVector trueWind;
+        trueWind = calcTrueWind(&ent->appWind, ent->velocity.getMagnitude(), ent->heading);
+
+        buffer[0] = '\0';
+        snprintf(buffer, sizeof(buffer), "TWS %.0fkts TWD %.0f%s",
+                 trueWind.getMagnitude(),
+                 trueWind.getBearing(), g_degStr);
+        g_tft.println(buffer);
+    }
+    else {
+        g_tft.println("No log entries");
+    }
+}
+
+
+N2kVector calcTrueWind(const N2kVector* appWind, double speed, double hdg)
+{
+    N2kVector boat(speed, hdg);
+    N2kVector trueWindDir;
+
+    // Calculate apparent wind direction.
+    N2kVector appWindDir(appWind->getMagnitude(), appWind->getSignedBearing() + hdg);
+
+    // Then subtract boat vector to get true wind direction. If hdg is 0, then this
+    // is also TWA.
+    trueWindDir.setXY(appWindDir.getX() - boat.getX(), appWindDir.getY() - boat.getY());
+
+    return trueWindDir;
+}
+
 // Snapshots a new on-the-hour log entry.
-bool addLogEntry(uint16_t timestamp, int16_t tzOffset,
-                 const N2kPos* pos, const N2kVector* vel,  const N2kVector* appWind,
-                 const LogData* log) {
+bool addLogEntry()
+{
+    unsigned int timestamp = (unsigned int)g_secsSinceMidnight / 60;
+
+    memset(&g_logEntries[g_logEntryIndex], 0, sizeof(struct LogEntry));
+
     g_logEntries[g_logEntryIndex].bInUse = true;
 
     g_logEntries[g_logEntryIndex].timestamp = timestamp; // Minutes since midnight
-    g_logEntries[g_logEntryIndex].tzOffset = tzOffset;   // Timezone offset in minutes
-    g_logEntries[g_logEntryIndex].position = *pos;
-    g_logEntries[g_logEntryIndex].velocity = *vel;
-    g_logEntries[g_logEntryIndex].appWind = *appWind;
-    g_logEntries[g_logEntryIndex].logData = *log;
+    g_logEntries[g_logEntryIndex].tzOffset = g_tzOffset; // Timezone offset in minutes
+    g_logEntries[g_logEntryIndex].position = g_localPos;
+    g_logEntries[g_logEntryIndex].heading = g_hdg;
+    g_logEntries[g_logEntryIndex].velocity = g_localVelocity;
+    g_logEntries[g_logEntryIndex].appWind = g_appWind;
+    g_logEntries[g_logEntryIndex].logData = g_tripLog;
+#ifdef HAS_ATM_PRESSURE
+    g_logEntries[g_logEntryIndex].atmPressure = g_envAtmPressure;
+#endif    
 
     g_logEntryIndex = (g_logEntryIndex + 1) % NUM_LOG_ENTRIES;
 
@@ -951,76 +1186,6 @@ const LogEntry* getLogEntry(unsigned int n) {
     return nullptr;
 }
 
-
-//
-// Log entry subpage.
-//
-// Displays current time and saved on-the-hour logbook data.
-// D0 cycles over the last 4 hours.
-//
-void displaySubpageLog() {
-    char buffer[128];
-    const LogEntry* ent;
-    unsigned int now;
-
-    g_tft.setTextWrap(false);
-    g_tft.fillScreen(ST77XX_BLACK);
-    g_tft.setCursor(0, 0);
-    g_tft.setTextSize(2);
-    g_tft.setTextColor(ST77XX_YELLOW);
-
-    // Current time
-    now = g_secsSinceMidnight;
-    if (g_tzOffset) {
-        now += g_tzOffset * 60;
-    }
-    snprintf(buffer, sizeof(buffer), "%02d:%02d:%02d %s\n",
-             now / 3600, (now % 3600) / 60, now % 60,
-             g_tzOffset ? "Local" : "UTC");
-    g_tft.println(buffer);
-
-    ent = getLogEntry(g_selLogEntry);
-
-    if (ent) {
-        if (ent->tzOffset) {
-            snprintf(buffer, sizeof(buffer), "%02d:%02d Local",
-                     (ent->timestamp + ent->tzOffset) / 60,
-                     (ent->timestamp + ent->tzOffset) % 60);
-        }
-        else {
-            snprintf(buffer, sizeof(buffer), "%02d:%02d UTC", ent->timestamp / 60,
-                     ent->timestamp % 60);
-        }
-        g_tft.println(buffer);
-
-        g_tft.setTextColor(ST77XX_WHITE);
-        buffer[0] = '\0';
-        ent->position.toString(buffer, sizeof(buffer), N2kPos::FMT_LAT_ONLY);
-        g_tft.println(buffer);
-        buffer[0] = '\0';
-        ent->position.toString(buffer, sizeof(buffer), N2kPos::FMT_LON_ONLY);
-        g_tft.println(buffer);
-
-        buffer[0] = '\0';
-        snprintf(buffer, sizeof(buffer), "SOG %.1fkts COG %.0f%s",
-                 ent->velocity.getMagnitude(),
-                 ent->velocity.getBearing(), g_degStr);
-        g_tft.println(buffer);
-
-        buffer[0] = '\0';
-        snprintf(buffer, sizeof(buffer), "AWS %.0fkts AWA %.0f%s",
-                 ent->appWind.getMagnitude(),
-                 ent->appWind.getSignedBearing(), g_degStr);
-        g_tft.println(buffer);
-
-        buffer[0] = '\0';
-        snprintf(buffer, sizeof(buffer), "LOG %.1fnm",
-                 g_tripLog.distance);
-    }
-    else {
-        g_tft.println("No log entries");
-    }
-}
 
 //
 // AIS top-level page.
@@ -1315,7 +1480,11 @@ void handlePgn128267Msg(const tN2kMsg &N2kMsg) {
 
     if (ParseN2kWaterDepth(N2kMsg, sid, val1, val2)) {
         if (!N2kIsNA(val1) && !N2kIsNA(val2)) {
+#ifdef USE_METRIC
+            g_depth = val1 + val2;
+#else
             g_depth = meters2Ft(val1 + val2);
+#endif
         }
     }
 }
@@ -1547,8 +1716,7 @@ void handlePgn130306Msg(const tN2kMsg &N2kMsg) {
             g_appWind.set(metersPerSec2Kts(val1), rad2Deg(val2));
 
             // Calculate true wind, relative to boat
-            N2kVector boat(g_localVelocity.getMagnitude(), 0);
-            g_trueWind.setXY(g_appWind.getX() - boat.getX(), g_appWind.getY() - boat.getY());
+            g_trueWind = calcTrueWind(&g_appWind, g_localVelocity.getMagnitude(), 0);
         }
     }
 }
