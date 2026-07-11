@@ -55,7 +55,7 @@
 
 #define VERSION_NUM      "v1.1.0"
 #define UPDATE_INTERVAL  1
-#define AIS_TIMEOUT      60
+#define AIS_TIMEOUT      (3 * 60 + 10)
 
 // Default magnetic variation, in case this is not provided from the network.
 // Modify this value based on the region of operation.
