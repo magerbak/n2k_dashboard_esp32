@@ -11,7 +11,7 @@
 class Cpa
 {
 public:
-    Cpa() : m_t(0) {}
+    Cpa() {}
     Cpa(const N2kPos& a, const N2kVector& va, const N2kPos& b, const N2kVector& vb);
     ~Cpa() = default;
 
@@ -20,10 +20,16 @@ public:
     double getDistance() const { return m_v.getMagnitude(); }
     double getBearing() const { return m_v.getBearing(); }
 
+    // Absolute time of CPA
     const time_t* getTime() const { return &m_t; }
+    // Time of CPA relative to Ref
     double getRelTime(time_t Ref) const { return difftime(m_t, Ref); }
+
+    // Difference in time to reach path intersection. A negative value means A is ahead of B.
+    double getIntersectDeltaTime() const { return m_deltaT; }
 
 private:
     N2kVector m_v;
-    time_t m_t;
+    time_t m_t = 0;
+    double m_deltaT = 0.0;
 };

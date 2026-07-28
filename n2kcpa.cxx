@@ -45,5 +45,37 @@ void Cpa::update(const N2kPos &a, const N2kVector &va, const N2kPos &b, const N2
     CpaDeltaPos.setXY(DeltaPos.getX() + DeltaV.getX() * t,
                       DeltaPos.getY() + DeltaV.getY() * t);
     m_v = CpaDeltaPos;
+
+    // Determine whether vessel A passes ahead or behind vessel B by determining
+    // whether it arrives at intersection point before or after B.
+    //
+    // Solve the linear system for respective times to reach the path
+    // intersection point (with unknowns ta and tb):
+    // a + va * ta = b + vb * tb
+    // va * ta - vb * tb = b - a = DeltaPos
+    //
+    // Which can be expressed as a matrix operation:
+    // |va.x  -vb.x| |ta| = |DeltaPos.x|
+    // |va.y  -vb.y| |tb|   |DeltaPos.y|
+    //
+    // With Determinate = (va.x * -vb.y) - (-vb.x * va.y)
+    //
+    // Inverse matrix is then:
+    // |-vb.y  vb.x| / Determinate
+    // |-va.y  va.x|
+    //
+    // And finally:
+    // |ta| = |-vb.y  vb.x| |DeltaPos.x| / Determinate
+    // |tb|   |-va.y  va.x| |DeltaPos.y|
+
+    // Determinant of the 2D system matrix
+    double Det = (va.getX() * -vb.getY()) - (-vb.getX() * va.getY());
+
+    double ta = (vb.getX() * DeltaPos.getY() - DeltaPos.getX() * vb.getY())/ Det;
+    double tb = (va.getX() * DeltaPos.getY() - DeltaPos.getX() * va.getY()) / Det;
+
+    // Difference in time to intersection point.
+    m_deltaT = ta - tb;
+
 }
 
