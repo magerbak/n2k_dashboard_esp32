@@ -48,7 +48,7 @@
 #include "n2kunits.h"
 #include "n2kaistarget.h"
 
-#define VERSION_NUM      "v1.1.0"
+#define VERSION_NUM      "v1.1.1"
 #define UPDATE_INTERVAL  1
 #define AIS_TIMEOUT      (3 * 60 + 10)
 
@@ -1193,11 +1193,16 @@ const LogEntry* getLogEntry(unsigned int n) {
 //
 // North-up plot of AIS targets at various ranges defined by page ID.
 // Vectors for each target show projected position in 5min.
-// Dangerous targets are displayed in red.
+//
+// Dangerous targets are displayed in red (projected to pass within 1nm in the
+// next 60mins).
 //
 // D0 to cycle through targets displaying vessel name, range and bearing in
-// bottom left. CPA distance and time (mins) is shown in top-right if vessel is
-// approaching our position.
+// bottom left.
+//
+// CPA distance and time (mins) is shown in top-right if vessel is
+// converging on our position. Displayed in orange if passing ahead of us,
+// displayed in red if we pass ahead of them (considered more dangerous).
 //
 // D1 to switch to details AIS info subpage for the selected target.
 //
@@ -1265,6 +1270,7 @@ void displayPageAis(Page pg, time_t now) {
             double cpad = target->getCpa()->getDistance();
             double cpab = target->getCpa()->getBearing();
             double cpat = target->getCpa()->getRelTime(now) / 60;
+            bool bTargetPassingAhead = target->getCpa()->getIntersectDeltaTime() < 0;
             const N2kVector &p = target->getRelDistance();
             const N2kVector &v = target->getVelocity();
 
@@ -1279,7 +1285,7 @@ void displayPageAis(Page pg, time_t now) {
 
             // Draw CPA info top-right
             if (cpat >= 0.0 && !std::isnan(cpad)) {
-                g_tft.setTextColor(ST77XX_RED);
+                g_tft.setTextColor(bTargetPassingAhead ? ST77XX_ORANGE : ST77XX_RED);
                 drawJustifiedVal(cpad, 2, "nm", DISPLAY_WIDTH, 0, TXT_JUSTIFIED);
                 drawJustifiedVal(cpab, 0, g_degStr, DISPLAY_WIDTH, 32, TXT_JUSTIFIED);
                 drawJustifiedVal(cpat, 1, "m", DISPLAY_WIDTH, 48, TXT_JUSTIFIED);
