@@ -12,12 +12,7 @@
   internal CAN controller (external transceiver required).
 
  **************************************************************************/
-//#define TESTING
-
-//#define USE_METRIC  // Define to use m (depth), mbar (pressure), celcius (temp)
-
-//#define HAS_BMP580  // Temperature and pressure sensor
-//#define HAS_BME280  // Temperature, humidity and pressure sensor
+#include "n2k_config.h"      // Build options
 
 #include <limits>
 #include <memory>
@@ -185,14 +180,17 @@ float g_envAtmTemp;
 float g_envAtmHumidity;
 #endif
 
-#ifdef USE_METRIC
+#ifdef USE_METRIC_PRESSURE
 static const int g_precPressure = 0;
 static const char g_unitsPressure[] = "mb";
-static const char g_unitsTemp[] = { 0xf8, 'C', '\0' };
-static const char g_unitsDepth[] = "m";
 #else
 static const int g_precPressure = 2;
 static const char g_unitsPressure[] = { '"', '\0' };
+#endif
+#ifdef USE_METRIC
+static const char g_unitsTemp[] = { 0xf8, 'C', '\0' };
+static const char g_unitsDepth[] = "m";
+#else
 static const char g_unitsTemp[] = { 0xf8, 'F', '\0' };
 static const char g_unitsDepth[] = "ft";
 #endif
@@ -621,7 +619,7 @@ bool historyCallback(void* user) {
 void readEnvironmentalSensors() {
 #if (defined HAS_BMP580)
     if (g_envSensor.dataReady() && g_envSensor.performReading()) {
-#ifdef USE_METRIC
+#ifdef USE_METRIC_PRESSURE
         // Leave pressure in millibars
         g_envAtmPressure = g_envSensor.pressure;
 #else
@@ -637,11 +635,14 @@ void readEnvironmentalSensors() {
 #endif
     }
 #elif (defined HAS_BME280)
-#ifdef USE_METRIC
+#ifdef USE_METRIC_PRESSURE
     g_envAtmPressure = g_envSensor.readPressure() / 100.0;
-    g_envAtmTemp = g_envSensor.readTemperature();
 #else
     g_envAtmPressure = millibars2inHg(g_envSensor.readPressure() / 100.0);
+#endif
+#ifdef USE_METRIC
+    g_envAtmTemp = g_envSensor.readTemperature();
+#else
     g_envAtmTemp = celcius2Farenheit(g_envSensor.readTemperature());
 #endif
     g_envAtmHumidity = g_envSensor.readHumidity();
