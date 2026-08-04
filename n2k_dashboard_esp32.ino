@@ -22,13 +22,8 @@
 #include <Adafruit_ST7789.h> // Hardware-specific library for ST7789
 #ifdef HAS_BMP580
 #include "Adafruit_BMP5xx.h"
-#define HAS_ATM_PRESSURE
-#define HAS_ATM_TEMP
 #elif defined HAS_BME280
 #include "Adafruit_BME280.h"
-#define HAS_ATM_PRESSURE
-#define HAS_ATM_TEMP
-#define HAS_ATM_HUMIDITY
 #endif
 #include <SPI.h>
 
@@ -161,6 +156,8 @@ struct LogEntry {
     N2kVector appWind;
     LogData logData;
     float atmPressure;
+    float atmTemp;
+    float seaTemp;
 };
 
 // Use dedicated hardware SPI pins
@@ -170,15 +167,11 @@ Adafruit_BMP5xx g_envSensor;
 #elif defined HAS_BME280
 Adafruit_BME280 g_envSensor;
 #endif
-#ifdef HAS_ATM_PRESSURE
-float g_envAtmPressure;
-#endif
-#ifdef HAS_ATM_TEMP
-float g_envAtmTemp;
-#endif
-#ifdef HAS_ATM_HUMIDITY
-float g_envAtmHumidity;
-#endif
+
+float g_envAtmPressure = std::numeric_limits<float>::quiet_NaN();
+float g_envAtmTemp = std::numeric_limits<float>::quiet_NaN();
+float g_envAtmHumidity = std::numeric_limits<float>::quiet_NaN();
+float g_envSeaTemp = std::numeric_limits<float>::quiet_NaN();;
 
 #ifdef USE_METRIC_PRESSURE
 static const int g_precPressure = 0;
@@ -188,10 +181,10 @@ static const int g_precPressure = 2;
 static const char g_unitsPressure[] = { '"', '\0' };
 #endif
 #ifdef USE_METRIC
-static const char g_unitsTemp[] = { 0xf8, 'C', '\0' };
+static const char g_unitsTemp[] = "C";
 static const char g_unitsDepth[] = "m";
 #else
-static const char g_unitsTemp[] = { 0xf8, 'F', '\0' };
+static const char g_unitsTemp[] = "F";
 static const char g_unitsDepth[] = "ft";
 #endif
 
@@ -955,6 +948,8 @@ void displaySubpageHistory(const char* title, const MinMaxDataHistory<double>* h
 //
 void displayPagePosition() {
     char buffer[128];
+    char atmTemp[4] = "-";
+    char seaTemp[4] = "-";
     unsigned int now;
 
     g_tft.setTextWrap(false);
@@ -975,22 +970,28 @@ void displayPagePosition() {
     g_tft.println(buffer);
 
     // Atmospheric data in top-right
-#ifdef HAS_ATM_PRESSURE
+    if (!std::isnan(g_envAtmTemp)) {
+        snprintf(atmTemp, sizeof(atmTemp), "%.0f", g_envAtmTemp);
+    }
+    if (!std::isnan(g_envSeaTemp)) {
+        snprintf(seaTemp, sizeof(seaTemp), "%.0f", g_envSeaTemp);
+    }
+
     buffer[0] = '\0';
-    snprintf(buffer, sizeof(buffer), "%.*f%s", g_precPressure, g_envAtmPressure,
-             g_unitsPressure);
+    snprintf(buffer, sizeof(buffer), "%s/%s%s", atmTemp, seaTemp, g_unitsTemp);
     drawJustifiedText(buffer, DISPLAY_WIDTH, 0, TXT_JUSTIFIED);
-#endif
-#ifdef HAS_ATM_TEMP
-    buffer[0] = '\0';
-    snprintf(buffer, sizeof(buffer), "%.0f%s", g_envAtmTemp, g_unitsTemp);
-    drawJustifiedText(buffer, DISPLAY_WIDTH, 32, TXT_JUSTIFIED);
-#endif
-#ifdef HAS_ATM_HUMIDITY
-    buffer[0] = '\0';
-    snprintf(buffer, sizeof(buffer), "%.0f%%", g_envAtmHumidity);
-    drawJustifiedText(buffer, DISPLAY_WIDTH, 48, TXT_JUSTIFIED);
-#endif
+
+    if (!std::isnan(g_envAtmPressure)) {
+        buffer[0] = '\0';
+        snprintf(buffer, sizeof(buffer), "%.*f%s", g_precPressure, g_envAtmPressure,
+                 g_unitsPressure);
+        drawJustifiedText(buffer, DISPLAY_WIDTH, 32, TXT_JUSTIFIED);
+    }
+    if (!std::isnan(g_envAtmHumidity)) {
+        buffer[0] = '\0';
+        snprintf(buffer, sizeof(buffer), "%.0f%%", g_envAtmHumidity);
+        drawJustifiedText(buffer, DISPLAY_WIDTH, 48, TXT_JUSTIFIED);
+    }
 
     // Position in cyan
     g_tft.setTextColor(ST77XX_CYAN);
@@ -1066,6 +1067,8 @@ void displayPagePosition() {
 //
 void displaySubpageLog() {
     char buffer[128];
+    char atmTemp[4] = "-";
+    char seaTemp[4] = "-";
     const LogEntry* ent;
 
     g_tft.setTextWrap(false);
@@ -1087,10 +1090,21 @@ void displaySubpageLog() {
                      ent->timestamp % 60);
         }
         g_tft.println(buffer);
+        g_tft.setTextColor(ST77XX_WHITE);
+
+        if (!std::isnan(ent->atmTemp)) {
+            snprintf(atmTemp, sizeof(atmTemp), "%.0f", ent->atmTemp);
+        }
+        if (!std::isnan(ent->seaTemp)) {
+            snprintf(seaTemp, sizeof(seaTemp), "%.0f", ent->seaTemp);
+        }
+
+        buffer[0] = '\0';
+        snprintf(buffer, sizeof(buffer), "%s/%s%s", atmTemp, seaTemp, g_unitsTemp);
+        drawJustifiedText(buffer, DISPLAY_WIDTH, 0, TXT_JUSTIFIED);
 
         // Add a small gap for improved readability
         g_tft.setCursor(0, 21);
-        g_tft.setTextColor(ST77XX_WHITE);
         buffer[0] = '\0';
         ent->position.toString(buffer, sizeof(buffer), N2kPos::FMT_LAT_ONLY);
         g_tft.println(buffer);
@@ -1098,17 +1112,19 @@ void displaySubpageLog() {
         ent->position.toString(buffer, sizeof(buffer), N2kPos::FMT_LON_ONLY);
         g_tft.println(buffer);
 
+        if (!std::isnan(ent->atmPressure)) {
+            buffer[0] = '\0';
+            snprintf(buffer, sizeof(buffer), "%.*f%s", g_precPressure, ent->atmPressure,
+                     g_unitsPressure);
+            drawJustifiedText(buffer, DISPLAY_WIDTH, 21 + 16, TXT_JUSTIFIED);
+        }
+
         // Add a small gap for improved readability
         g_tft.setCursor(0, 56);
 
         buffer[0] = '\0';
-#ifdef HAS_ATM_PRESSURE
-        snprintf(buffer, sizeof(buffer), "LOG %.1fnm %.*f%s",
-                 ent->logData.distance, g_precPressure, ent->atmPressure, g_unitsPressure);
-#else
         snprintf(buffer, sizeof(buffer), "LOG %.1fnm",
                  ent->logData.distance);
-#endif
         g_tft.println(buffer);
 
         buffer[0] = '\0';
@@ -1169,9 +1185,9 @@ bool addLogEntry()
     g_logEntries[g_logEntryIndex].velocity = g_localVelocity;
     g_logEntries[g_logEntryIndex].appWind = g_appWind;
     g_logEntries[g_logEntryIndex].logData = g_tripLog;
-#ifdef HAS_ATM_PRESSURE
     g_logEntries[g_logEntryIndex].atmPressure = g_envAtmPressure;
-#endif    
+    g_logEntries[g_logEntryIndex].atmTemp = g_envAtmTemp;
+    g_logEntries[g_logEntryIndex].seaTemp = g_envSeaTemp;
 
     g_logEntryIndex = (g_logEntryIndex + 1) % NUM_LOG_ENTRIES;
 
@@ -1508,11 +1524,17 @@ void handlePgn129025Msg(const tN2kMsg &N2kMsg) {
             g_bPosValid = true;
 
             // If this is the first time we've received our position, update the CPA
-            // of all AIS targets.
+            // of all AIS targets and take a log history snapshot.
             if (bIsFirstPos) {
                 g_lastPos = g_localPos;
                 for (auto& t : g_targets) {
                     t->calcCpa(g_localPos, g_localVelocity);
+                }
+
+                // If we already have the time then take an initial log history snapshot
+                // once we have a position.
+                if (g_hourTimer.isEnabled()) {
+                    addLogEntry();
                 }
             }
         }
@@ -1559,6 +1581,12 @@ void handlePgn129033Msg(const tN2kMsg &N2kMsg) {
                 int hrs = (int)trunc(secsSinceMidnight / 3600) + 1;
                 int remaining = 3600 * hrs - (int)trunc(secsSinceMidnight) + 30;
                 g_hourTimer.begin(&g_hourTimer, remaining * 1000, logEntryCallback);
+
+                // If we already have GPS position and we just got time, then take
+                // an initial log history snapshot.
+                if (g_bPosValid) {
+                    addLogEntry();
+                }
             }
         }
     }
@@ -1771,6 +1799,69 @@ void handlePgn127258Msg(const tN2kMsg &N2kMsg) {
     }
 }
 
+// PGN 130312: Sea Temp 67.1F
+void handlePgn130312Msg(const tN2kMsg &N2kMsg) {
+    unsigned char sid = 0;
+    unsigned char instance = 0;
+    tN2kTempSource tempSrc = N2kts_SeaTemperature;
+    double actualTemp = 0.0;
+    double setTemp = 0.0;
+
+    if (ParseN2kTemperature(N2kMsg, sid, instance, tempSrc, actualTemp, setTemp)) {
+        if (!N2kIsNA(actualTemp)) {
+            switch (tempSrc) {
+                case N2kts_SeaTemperature:
+#ifdef USE_METRIC
+                    g_envSeaTemp = KelvinToC(actualTemp);
+#else
+                    g_envSeaTemp = KelvinToF(actualTemp);
+#endif
+                    break;
+
+                case N2kts_OutsideTemperature:
+                case N2kts_InsideTemperature:
+#ifdef USE_METRIC
+                    g_envAtmTemp = KelvinToC(actualTemp);
+#else
+                    g_envAtmTemp = KelvinToF(actualTemp);
+#endif
+                    break;
+
+                default:
+                    break;
+            }
+        }
+    }
+}
+
+void handlePgn130314Msg(const tN2kMsg &N2kMsg) {
+    unsigned char sid = 0;
+    unsigned char instance = 0;
+    tN2kPressureSource pressureSrc = N2kps_Atmospheric;
+    double pressure = 0.0;
+
+    if (ParseN2kPressure(N2kMsg, sid, instance, pressureSrc, pressure)) {
+        if (!N2kIsNA(pressure)) {
+            switch (pressureSrc) {
+                case N2kps_Atmospheric:
+#ifdef USE_METRIC_PRESSURE
+                    g_envAtmPressure = PascalTomBar(pressure);
+#else
+                    g_envAtmPressure = millibars2inHg(PascalTomBar(pressure));
+#endif
+                    break;
+
+                default:
+                    break;
+            }
+        }
+    }
+}
+
+
+
+
+
 // Process incoming N2K messages to update our data model.
 void handleNMEA2000Msg(const tN2kMsg &N2kMsg) {
 
@@ -1818,6 +1909,14 @@ void handleNMEA2000Msg(const tN2kMsg &N2kMsg) {
 
     case 129810:
         handlePgn129810Msg(N2kMsg);
+        break;
+
+    case 130312:
+        handlePgn130312Msg(N2kMsg);
+        break;
+
+    case 130314:
+        handlePgn130314Msg(N2kMsg);
         break;
 
     case 130306:
