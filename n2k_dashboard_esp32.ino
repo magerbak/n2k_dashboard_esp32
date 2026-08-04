@@ -43,7 +43,7 @@
 #include "n2kunits.h"
 #include "n2kaistarget.h"
 
-#define VERSION_NUM      "v1.1.1"
+#define VERSION_NUM      "v1.2.0"
 #define UPDATE_INTERVAL  1
 #define AIS_TIMEOUT      (3 * 60 + 10)
 
