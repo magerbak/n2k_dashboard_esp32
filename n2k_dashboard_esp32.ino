@@ -43,7 +43,7 @@
 #include "n2kunits.h"
 #include "n2kaistarget.h"
 
-#define VERSION_NUM      "v1.2.0"
+#define VERSION_NUM      "v1.3.0"
 #define UPDATE_INTERVAL  1
 #define AIS_TIMEOUT      (3 * 60 + 10)
 
@@ -79,6 +79,7 @@ enum Page {
     PAGE_AIS_12NM,
     PAGE_AIS_6NM,
     PAGE_AIS_3NM,
+    PAGE_AIS_1NM,
     NUM_PAGES
 } g_page = PAGE_WIND;
 
@@ -418,6 +419,7 @@ void handlePageButtonEvents(Event e) {
             case PAGE_AIS_12NM:
             case PAGE_AIS_6NM:
             case PAGE_AIS_3NM:
+            case PAGE_AIS_1NM:
                 if (g_targets.size() > 0) {
                     switch (e) {
                         case EVT_D0_PRESS:
@@ -1225,11 +1227,29 @@ const LogEntry* getLogEntry(unsigned int n) {
 // D2 cycles to next top-level page.
 void displayPageAis(Page pg, time_t now) {
     const double radius = DISPLAY_HEIGHT / 2.0 - 7.0;
-    double range = pg == PAGE_AIS_12NM ? 12.0 : pg == PAGE_AIS_6NM ? 6.0 : 3.0;
-    double range_scale = radius / range;
-    double vector_scale = range_scale / 12.0;;
     int x0 = DISPLAY_WIDTH / 2;
     int y0 = DISPLAY_HEIGHT / 2;
+
+    double range = 12.0;
+    switch (pg) {
+        case PAGE_AIS_12NM:
+            range = 12.0;
+            break;
+
+        case PAGE_AIS_6NM:
+            range = 6.0;
+            break;
+
+        case PAGE_AIS_3NM:
+            range = 3.0;
+            break;
+
+        case PAGE_AIS_1NM:
+            range = 1.0;
+            break;
+    }
+    double range_scale = radius / range;
+    double vector_scale = range_scale / 12.0;;
 
     g_tft.setTextWrap(false);
     g_tft.fillScreen(ST77XX_BLACK);
@@ -1462,6 +1482,7 @@ void displayUpdate(bool bForce) {
                     case PAGE_AIS_12NM:
                     case PAGE_AIS_6NM:
                     case PAGE_AIS_3NM:
+                    case PAGE_AIS_1NM:
                         displayPageAis(g_page, now);
                         break;
                 }
