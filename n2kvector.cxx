@@ -5,6 +5,11 @@
 
 N2kVector::N2kVector(double mag, double bearing)
 {
+    if (std::isnan(mag) || std::isnan(bearing)) {
+        mag = 0.0;
+        bearing = 0.0;
+    }
+
     set(mag, bearing);
 }
 

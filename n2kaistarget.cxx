@@ -7,11 +7,109 @@
 #include "n2kaistarget.h"
 #include "n2kunits.h"
 
+const char* N2kAISTarget::s_navStatusTable[NAV_STATUS_AIS_SART + 1] =
+{
+    "Motoring",
+    "Anchored",
+    "Not Under Command",
+    "Restricted Manoeuverability",
+    "Constrained By Draught",
+    "Moored",
+    "Aground",
+    "Fishing",
+    "Sailing",
+    "Hazmat High Speed",
+    "Hazmat Wing In Ground",
+    "",
+    "",
+    "",
+    "Search And Rescue",
+};
+
+const char* N2kAISTarget::getNavStatusStr() const
+{
+    if (m_class == CLASS_A &&
+        m_navStatus >= NAV_STATUS_UNDER_WAY_MOTORING &&
+        m_navStatus <= NAV_STATUS_AIS_SART) {
+        return s_navStatusTable[m_navStatus];
+    }
+
+    return "";
+}
+
+const char* N2kAISTarget::getVesselTypeStr() const
+{
+    int cat = m_type / 10;
+
+    switch (cat) {
+    case 4:
+        return "High Speed";
+
+    case 6:
+        return "Passenger";
+
+    case 7:
+        return "Cargo";
+
+    case 8:
+        return "Tanker";
+
+    default:
+        break;
+    }
+
+    switch (m_type) {
+    case 30:
+        return "Fishing";
+
+    case 31:
+    case 32:
+    case 52:
+        return "Tug";
+
+    case 33:
+        return "Dredger";
+
+    case 34:
+        return "Dive Vessel";
+
+    case 35:
+        return "Military";
+
+    case 36:
+        return "Sailing";
+
+    case 37:
+        return "Yacht";
+
+    case 50:
+        return "Pilot";
+
+    case 55:
+        return "Police";
+
+    case 59:
+        return "Special";
+
+    default:
+        return "";
+    }
+}
+
+
 N2kAISTarget::N2kAISTarget(uint32_t mmsi) :
     m_mmsi(mmsi)
 {
     // Default name is MMSI
     snprintf(m_name, sizeof(m_name), "%u", mmsi);
+}
+
+void N2kAISTarget::update(const N2kPos &pos, const N2kVector &vel, NavStatus status)
+{
+    // Class A position report includes NavStatus
+    m_class = CLASS_A;
+    m_navStatus = status;
+    update(pos, vel);
 }
 
 void N2kAISTarget::update(const N2kPos &pos, const N2kVector &vel)

@@ -8,10 +8,11 @@
 //
 // Min/max data is updated every time updateData is called.
 // History is advanced each time updateHistory is called.
+//
 // History data is retrieved by passing a callback to forEachData. Callback will
 //   be called once or twice (after buffer has wrapped) with a range of data (oldest
 //   to newest) for min and max values.
-//   Final call will be when offset + len == getLength()
+//   Final call will be when offset is non-zero.
 template <typename T>
 class MinMaxDataHistory
 {
@@ -91,11 +92,14 @@ public:
     void forEachData(Callback callback, void* user) const
     {
         size_t offset = 0;
+        // If we havent wrapped yet the oldest part of the history is absent.
+        // The most recent m_offset samples are always present.
         if (m_bWrapped) {
             (*callback)(user, &m_dataMin[m_offset], &m_dataMax[m_offset],
                         m_len - m_offset, offset);
-            offset += m_len - m_offset;
         }
+
+        offset = m_len - m_offset;
         (*callback)(user, &m_dataMin[0], &m_dataMax[0], m_offset, offset);
     }
 

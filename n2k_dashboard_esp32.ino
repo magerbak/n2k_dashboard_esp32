@@ -1,13 +1,13 @@
 /**************************************************************************
   Monitors NMEA2000 bus and displays a simple dashboard of useful info.
 
-  v1.1 Added support for recording ambient temperature and pressure via a BMP580/BME280
+  Works with the Hosyond ESP32-S3 2.8" IPS LCD display (https://a.co/d/04SSH8Cm)
 
-  Works with the Adafruit ESP32-S3 Reverse TFT Feather
-    ----> https://www.adafruit.com/products/5691
+  Compiles for Arduino using ESP32-S3 Dev Module board config.
 
-  Uses the Adafruit GFX library and the ST7789 display driver.
-  Optionally uses the Adafruit_BMP5xx/Adafruit_BME280 sensor library when defined.
+  Uses TFT_eSPI and TFT_eWidget GFX libraries with ILI9341 driver and
+  FT6336 touch screen driver.
+
   Uses the NEMA2000 library for parsing N2K communications using the ESP32
   internal CAN controller (external transceiver required).
 
@@ -18,32 +18,35 @@
 #include <memory>
 #include <list>
 #include <Preferences.h>     // For persistent storage of log data
-#include <Adafruit_GFX.h>    // Core graphics library
-#include <Adafruit_ST7789.h> // Hardware-specific library for ST7789
-#ifdef HAS_BMP580
-#include "Adafruit_BMP5xx.h"
-#elif defined HAS_BME280
-#include "Adafruit_BME280.h"
-#endif
+
+#include <TFT_eSPI.h>        // The library itself is modified to select a
+                             // User_Setup.h for the appropriate display driver.
+#include <TFT_eWidget.h>     // For graphing support
 #include <SPI.h>
+
+#define TOUCH_FT6336_SCL 15
+#define TOUCH_FT6336_SDA 16
+#define TOUCH_FT6336_INT 17
+#define TOUCH_FT6336_RST 18
+#include <FT6336.h>         // Touch screen uses I2C
 
 #include "N2kMsg.h"
 #include "NMEA2000.h"
-#define ESP32_CAN_SILENT_PIN GPIO_NUM_9
-#define ESP32_CAN_TX_PIN GPIO_NUM_6
-#define ESP32_CAN_RX_PIN GPIO_NUM_5
+#define ESP32_CAN_SILENT_PIN GPIO_NUM_14
+#define ESP32_CAN_TX_PIN GPIO_NUM_2
+#define ESP32_CAN_RX_PIN GPIO_NUM_3
 #include <NMEA2000_esp32.h> // Custom NMEA2000_esp32 support for S3 (https://github.com/offspring/NMEA2000_esp32)
 #include <N2kMessages.h>
 
-#include "debounced_button.h"
 #include "simple_timer.h"
 #include "data_history.h"
 #include "n2kvector.h"
 #include "n2kpos.h"
 #include "n2kunits.h"
 #include "n2kaistarget.h"
+#include "touch_rect.h"
 
-#define VERSION_NUM      "v1.3.0"
+#define VERSION_NUM      "v2.0.0"
 #define UPDATE_INTERVAL  1
 #define AIS_TIMEOUT      (3 * 60 + 10)
 
@@ -65,10 +68,11 @@
 // Total duration of history = num data points * HISTORY_AGGREGATION_INTERVAL_MS
 #define HISTORY_DEF_NUM_DATA_POINTS         60
 
-tNMEA2000 &g_NMEA2000=*(new tNMEA2000_esp32());
+#define DISPLAY_WIDTH   320
+#define DISPLAY_HEIGHT  240
 
-#define DISPLAY_WIDTH   240
-#define DISPLAY_HEIGHT  135
+#define ARROW_HEIGHT    25
+#define ARROW_WIDTH     12
 
 #define NUM_LOG_ENTRIES 4
 
@@ -76,12 +80,10 @@ tNMEA2000 &g_NMEA2000=*(new tNMEA2000_esp32());
 enum Page {
     PAGE_WIND,
     PAGE_POSITION,
-    PAGE_AIS_12NM,
-    PAGE_AIS_6NM,
-    PAGE_AIS_3NM,
-    PAGE_AIS_1NM,
+    PAGE_AIS,
+
     NUM_PAGES
-} g_page = PAGE_WIND;
+};
 
 enum Subpage {
     SUBPAGE_NONE,
@@ -98,7 +100,7 @@ enum Subpage {
 
     // AIS subpages
     SUBPAGE_AIS_INFO,
-} g_subpage = SUBPAGE_NONE;
+};
 
 enum Event {
     EVT_NONE,
@@ -113,19 +115,6 @@ enum Event {
 enum TextLayout {
     TXT_JUSTIFIED,
     TXT_CENTERED,
-};
-
-struct HistWindowContext {
-    uint16_t color;
-    // Position of top-left of history window.
-    int16_t x;
-    int16_t y;
-    // Width and height of history window.
-    int16_t w;
-    int16_t h;
-
-    unsigned int range_x;   // Range of x axis
-    unsigned int range_y;   // Range of y axis
 };
 
 struct HistStatsContext {
@@ -161,13 +150,66 @@ struct LogEntry {
     float seaTemp;
 };
 
-// Use dedicated hardware SPI pins
-Adafruit_ST7789 g_tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
-#ifdef HAS_BMP580
-Adafruit_BMP5xx g_envSensor;
-#elif defined HAS_BME280
-Adafruit_BME280 g_envSensor;
-#endif
+// Abbreviations for TFT_eSPI fonts.
+#define GFXFF 1
+
+// These are modified versions of the standard GFX FreeFonts with the same
+// filename, that replace the '~' character with the '°' symbol for convenience.
+// The Fonts directory includes the 48 fonts from the TFT_eSPI library but we
+// only include 3.
+#include "Fonts/FreeSansBold9pt7b.h"
+#include "Fonts/FreeSansBold12pt7b.h"
+#include "Fonts/FreeSansBold18pt7b.h"
+
+// The font names have a Mod suffix to distinguish them from the stock fonts.
+#define FONT_SMALL  &FreeSansBoldMod9pt7b
+#define FONT_MEDIUM &FreeSansBoldMod12pt7b
+#define FONT_LARGE  &FreeSansBoldMod18pt7b
+
+// fontHeight() returns a line-spacing that accounts for ascending and descending
+// lowercase characters. Since we are primarily using uppercase, this additional
+// spacing looks overly generous, so we use a more compact spacing instead.
+#define FONT_SMALL_ADJ_HEIGHT   (21 - 5)
+#define FONT_MEDIUM_ADJ_HEIGHT  (28 - 6)
+#define FONT_LARGE_ADJ_HEIGHT   (42 - 9)
+
+// Pin usage as follow:
+//             CS  DC/RS  RESET  SDI/MOSI  SCK  SDO/MISO  LED    VCC     GND
+// ESP32-S3:   10    2      15      11      12      13     21     5V     GND
+TFT_eSPI g_tft;
+
+// Default orientation is portrait (240x320)
+FT6336 g_ts = FT6336(TOUCH_FT6336_SDA, TOUCH_FT6336_SCL, TOUCH_FT6336_INT,
+                     TOUCH_FT6336_RST, DISPLAY_HEIGHT, DISPLAY_WIDTH);
+
+tNMEA2000 &g_NMEA2000 = *(new tNMEA2000_esp32());
+
+// UI state
+Page g_page = PAGE_WIND;
+Subpage g_subpage = SUBPAGE_NONE;
+double g_aisRange = 12.0;
+
+// Common to all pages
+TouchRect g_nextPageRect;
+
+// Wind Page touch rects
+TouchRect g_awsRect;
+TouchRect g_depthRect;
+TouchRect g_twsRect;
+TouchRect g_sogRect;
+
+// Position Page touch rects
+TouchRect g_timeRect;
+TouchRect g_logResetRect;
+
+// AIS Page touch rects
+TouchRect g_rangeRect;
+TouchRect g_selectRect;
+TouchRect g_detailRect;
+
+// Subpage rects
+TouchRect g_subTitleRect;
+TouchRect g_subBodyRect;
 
 float g_envAtmPressure = std::numeric_limits<float>::quiet_NaN();
 float g_envAtmTemp = std::numeric_limits<float>::quiet_NaN();
@@ -217,11 +259,6 @@ N2kVector g_trueWind;       // Degrees, knots
 std::list<std::unique_ptr<N2kAISTarget>> g_targets;
 uint32_t g_selTarget = 0;   // MMSI of selected AIS target
 
-// UI buttons. On the Adafruit ESP32-S3 reverse TFT feather, these are on pins 0, 1 and 2.
-DebouncedButton g_buttonD0(0, LOW);
-DebouncedButton g_buttonD1(1);
-DebouncedButton g_buttonD2(2);
-
 // 1s timer for refreshing data model (ageing out AIS targets, sampling data history).
 SimpleTimer g_updateTimer;
 
@@ -242,10 +279,6 @@ MinMaxDataHistory<double> g_depthHistory;
 // Time since last display update in seconds.
 time_t g_lastUpdate = 0;
 
-// String just containing the degree symbol from the codepage 437 character set.
-static const char g_degStr[] = { 0xf8, '\0' };
-
-
 void setup(void) {
   Serial.begin(115200);
   delay(2000);
@@ -262,10 +295,6 @@ void setup(void) {
   pinMode(ESP32_CAN_SILENT_PIN, OUTPUT);
   digitalWrite(ESP32_CAN_SILENT_PIN, LOW /* HIGH */); // not silent
 
-  g_buttonD0.begin();
-  g_buttonD1.begin();
-  g_buttonD2.begin();
-
   g_updateTimer.begin(nullptr, HISTORY_SAMPLE_INTERVAL_MS, updateCallback);
   g_historyTimer.begin(nullptr, HISTORY_AGGREGATION_INTERVAL_MS, historyCallback);
   g_tripLogTimer.begin(nullptr, LOG_SAVE_INTERVAL_MS, logCallback);
@@ -276,44 +305,18 @@ void setup(void) {
   g_sogHistory.begin(60);
   g_depthHistory.begin(60);
 
-  // turn on backlite
-  pinMode(TFT_BACKLITE, OUTPUT);
-  digitalWrite(TFT_BACKLITE, HIGH);
-
-  // turn on the TFT / I2C power supply
-  pinMode(TFT_I2C_POWER, OUTPUT);
-  digitalWrite(TFT_I2C_POWER, HIGH);
-  delay(10);
-
   // initialize TFT
-  g_tft.init(DISPLAY_HEIGHT, DISPLAY_WIDTH);
-  g_tft.cp437(true);    // Use correct code page 437 indices
-  g_tft.setRotation(3);
+  g_tft.init();
+  g_tft.setRotation(1);
+  g_ts.begin();
+  g_ts.setRotation(1);
+
+  setupTouchRects();
 
   displaySplashScreen();
 
-#ifdef HAS_BMP580
-  if (g_envSensor.begin(BMP5XX_ALTERNATIVE_ADDRESS, &Wire)) {
-      Serial.println(F("Detected BMP580 sensor"));
-      g_envSensor.setTemperatureOversampling(BMP5XX_OVERSAMPLING_2X);
-      g_envSensor.setPressureOversampling(BMP5XX_OVERSAMPLING_16X);
-      g_envSensor.setIIRFilterCoeff(BMP5XX_IIR_FILTER_COEFF_3);
-      g_envSensor.setOutputDataRate(BMP5XX_ODR_50_HZ);
-      g_envSensor.setPowerMode(BMP5XX_POWERMODE_NORMAL);
-      g_envSensor.enablePressure(true);
-      g_envSensor.configureInterrupt(BMP5XX_INTERRUPT_LATCHED,
-                                     BMP5XX_INTERRUPT_ACTIVE_HIGH,
-                                     BMP5XX_INTERRUPT_PUSH_PULL, BMP5XX_INTERRUPT_DATA_READY, true);
-  }
-#elif defined HAS_BME280
-  if (g_envSensor.begin()) {
-      Serial.println(F("Detected BME280 sensor"));
-  }
-#endif
-
   delay(1000);
-
-  readEnvironmentalSensors();
+  displayUpdate(true);
 
   //NMEA2000.SetN2kCANMsgBufSize(8);
   //NMEA2000.SetN2kCANReceiveFrameBufSize(100);
@@ -326,214 +329,241 @@ void setup(void) {
 void loop() {
     uint32_t t = millis();
 
+    handleTouchEvents();
+
     // Drive our timers
     g_updateTimer.tick(t);
     g_historyTimer.tick(t);
     g_tripLogTimer.tick(t);
     g_hourTimer.tick(t);
 
-    // Poll buttons and drive UI
-    if (g_buttonD0.updateState()) {
-        handleButtonEvents(g_buttonD0.isPressed() ? EVT_D0_PRESS : EVT_D0_RELEASE);
-    }
-    if (g_buttonD1.updateState()) {
-        handleButtonEvents(g_buttonD1.isPressed() ? EVT_D1_PRESS : EVT_D1_RELEASE);
-    }
-    if (g_buttonD2.updateState()) {
-        handleButtonEvents(g_buttonD2.isPressed() ? EVT_D2_PRESS : EVT_D2_RELEASE);
-    }
-
     // Handle incoming N2K messages.
     g_NMEA2000.ParseMessages();
 }
 
-void handleButtonEvents(Event e) {
-    // A top level page is displayed when no subpage is active.
-    if (g_subpage == SUBPAGE_NONE) {
-        handlePageButtonEvents(e);
-    }
-    else {
-        handleSubpageButtonEvents(e);
-    }
+void setupTouchRects() {
+    g_nextPageRect.init(DISPLAY_WIDTH - ARROW_WIDTH - 30, DISPLAY_HEIGHT / 2 - ARROW_HEIGHT / 2 - 10,
+                        ARROW_WIDTH + 15 + 15, ARROW_HEIGHT + 10 * 2);
+    g_nextPageRect.setReleaseCallback(handleNextPageCallback, nullptr);
+
+    g_awsRect.init(0, 0, 70, 60);
+    g_awsRect.setReleaseCallback(handleAwsCallback,  nullptr);
+
+    g_depthRect.init(0, DISPLAY_HEIGHT / 2 - 30, 70, 60);
+    g_depthRect.setReleaseCallback(handleDepthCallback,  nullptr);
+
+    g_twsRect.init(0, DISPLAY_HEIGHT - 60, 70, 60);
+    g_twsRect.setReleaseCallback(handleTwsCallback,  nullptr);
+
+    g_sogRect.init(DISPLAY_WIDTH / 2 - 40, DISPLAY_HEIGHT / 2 - 40, 80, 80);
+    g_sogRect.setReleaseCallback(handleSogCallback,  nullptr);
+
+
+    g_timeRect.init(0, 0, DISPLAY_WIDTH / 2, 40);
+    g_timeRect.setReleaseCallback(handleTimeCallback,  nullptr);
+
+    g_logResetRect.init(0, FONT_MEDIUM_ADJ_HEIGHT * 4 - 5, DISPLAY_WIDTH / 2, FONT_MEDIUM_ADJ_HEIGHT + 15);
+    g_logResetRect.setReleaseCallback(handleLogResetCallback,  nullptr);
+
+
+    g_rangeRect.init(0, 0, DISPLAY_WIDTH / 3, 50);
+    g_rangeRect.setReleaseCallback(handleRangeCallback,  nullptr);
+
+    g_selectRect.init(DISPLAY_WIDTH / 2 - 90, DISPLAY_HEIGHT / 2 - 60, 180, 120);
+    g_selectRect.setReleaseCallback(handleSelectCallback,  nullptr);
+
+    g_detailRect.init(DISPLAY_WIDTH - DISPLAY_WIDTH / 2, DISPLAY_HEIGHT - 40, DISPLAY_WIDTH / 2, 40);
+    g_detailRect.setReleaseCallback(handleDetailCallback,  nullptr);
+
+    g_subTitleRect.init(0, 0, DISPLAY_WIDTH, 50);
+    g_subTitleRect.setReleaseCallback(handleSubTitleCallback,  nullptr);
+
+    g_subBodyRect.init(0, 40, DISPLAY_WIDTH, DISPLAY_HEIGHT - 50);
+    g_subBodyRect.setReleaseCallback(handleSubBodyCallback,  nullptr);
 }
 
-// Handle button events according to which top level page is active.
-void handlePageButtonEvents(Event e) {
-    const N2kAISTarget* last = nullptr;
-    bool bNeedUpdate = false;
-    int p;
 
-    // For top-level pages, D2 advances to the next page.
-    if (e == EVT_D2_PRESS) {
-        p = (int)g_page + 1;
-        if (p == NUM_PAGES) {
-            p = 0;
-        }
-        g_page = (Page)p;
-        bNeedUpdate = true;
-        g_tripResetConfirmation = false;
+void handleTouchEvents() {
+    uint16_t x = 0;
+    uint16_t y = 0;
+    bool bPressed = false;
+
+    g_ts.read();
+    if (g_ts.isTouched) {
+        x = g_ts.points[0].x;
+        y = g_ts.points[0].y;
+        bPressed = true;
     }
-    else {
+
+    if (g_subpage == SUBPAGE_NONE) {
+        // All top level pages have a next page button
+        g_nextPageRect.update(bPressed, x, y);
+
         switch (g_page) {
             case PAGE_WIND:
-                switch (e) {
-                    case EVT_D1_PRESS:
-                        // Switch to first history subpage
-                        g_subpage = SUBPAGE_HIST_AWS;
-                        bNeedUpdate = true;
-                        break;
-
-                    default:
-                        break;
-                }
+                g_awsRect.update(bPressed, x, y);
+                g_depthRect.update(bPressed, x, y);
+                g_twsRect.update(bPressed, x, y);
+                g_sogRect.update(bPressed, x, y);
                 break;
 
             case PAGE_POSITION:
-                switch (e) {
-                    case EVT_D0_PRESS:
-                        if (g_tripResetConfirmation) {
-                            g_tripLog.duration = 0;
-                            g_tripLog.distance = 0.0;
-                            g_prefs.putUInt("tripLogTime", g_tripLog.duration);
-                            g_prefs.putFloat("tripLogDist", g_tripLog.distance);
-                            g_tripResetConfirmation = false;
-                        }
-                        else {
-                            g_tripResetConfirmation = true;
-                        }
-                        bNeedUpdate = true;
-                        break;
-
-                    case EVT_D1_PRESS:
-                        g_tripResetConfirmation = false;
-                        g_selLogEntry = 0;
-                        g_subpage = SUBPAGE_POS_LOG;
-                        bNeedUpdate = true;
-                        break;
-
-                    default:
-                        break;
-                }
+                g_timeRect.update(bPressed, x, y);
+                g_logResetRect.update(bPressed, x, y);
                 break;
 
-            case PAGE_AIS_12NM:
-            case PAGE_AIS_6NM:
-            case PAGE_AIS_3NM:
-            case PAGE_AIS_1NM:
-                if (g_targets.size() > 0) {
-                    switch (e) {
-                        case EVT_D0_PRESS:
-                            // Cycle forward through targets
-                            setTarget(cycleAisTarget(g_targets, g_selTarget, g_page));
-                            bNeedUpdate = true;
-                            break;
-
-                        case EVT_D1_PRESS:
-                            if (g_selTarget) {
-                                g_subpage = SUBPAGE_AIS_INFO;
-                                bNeedUpdate = true;
-                            }
-                            break;
-
-                        default:
-                            break;
-                    }
-                }
-                break;
-
-            default:
+            case PAGE_AIS:
+                g_rangeRect.update(bPressed, x, y);
+                g_selectRect.update(bPressed, x, y);
+                g_detailRect.update(bPressed, x, y);
                 break;
         }
-    }
-
-done:
-    if (bNeedUpdate) {
-        displayUpdate(true);
-    }
-}
-
-// Handle button events according to which subpage is active.
-void handleSubpageButtonEvents(Event e) {
-    const N2kAISTarget* last = nullptr;
-    bool bNeedUpdate = false;
-    int p;
-    unsigned int ix;
-
-    // For all subpages, D1 exits back to parent top-level page.
-    if (e == EVT_D1_PRESS) {
-        g_subpage = SUBPAGE_NONE;
-        bNeedUpdate = true;
     }
     else {
-        switch (g_subpage) {
-            case SUBPAGE_HIST_AWS:
-            case SUBPAGE_HIST_TWS:
-            case SUBPAGE_HIST_SOG:
-            case SUBPAGE_HIST_DEPTH:
-                switch (e) {
-                    // Cycle through history subpages.
-                    case EVT_D0_PRESS:
-                        p = (int)g_subpage + 1;
-                        if (p == SUBPAGE_HIST_SEPARATOR) {
-                            p = SUBPAGE_HIST_AWS;
-                        }
-                        g_subpage = (Subpage)p;
-                        bNeedUpdate = true;
-                        break;
-
-                    default:
-                        break;
-                }
-                break;
-
-            case SUBPAGE_POS_LOG:
-                switch (e) {
-                    // Cycle through log entries
-                    case EVT_D0_PRESS:
-                        ix = (g_selLogEntry + 1) % NUM_LOG_ENTRIES;
-                        if (g_logEntries[ix].bInUse == false) {
-                            ix = 0;
-                        }
-                        g_selLogEntry = ix;
-                        bNeedUpdate = true;
-                        break;
-
-                    default:
-                        break;
-                }
-                break;
-
-            case SUBPAGE_AIS_INFO:
-                switch (e) {
-                    // Show info for the next visible target on the parent AIS page.
-                    case EVT_D0_PRESS:
-                        setTarget(cycleAisTarget(g_targets, g_selTarget, g_page));
-                        bNeedUpdate = true;
-                        break;
-
-                    default:
-                        break;
-                }
-                break;
-
-
-            default:
-                break;
-        }
-    }
-
-done:
-    if (bNeedUpdate) {
-        displayUpdate(true);
+        // For now subpages only care about touch events to the first row of
+        // text or the rest of the page.
+        g_subTitleRect.update(bPressed, x, y);
+        g_subBodyRect.update(bPressed, x, y);
     }
 }
 
+void handleNextPageCallback(void* user) {
+    int pg = (int)g_page + 1;
+    if (pg >= NUM_PAGES) {
+        pg = PAGE_WIND;
+    }
+    g_page = (Page)pg;
+    g_tripResetConfirmation = false;
+
+    displayUpdate(true);
+}
+
+void handleAwsCallback(void* user) {
+    g_subpage = SUBPAGE_HIST_AWS;
+
+    displayUpdate(true);
+}
+
+void handleDepthCallback(void* user) {
+    g_subpage = SUBPAGE_HIST_DEPTH;
+
+    displayUpdate(true);
+}
+
+void handleTwsCallback(void* user) {
+    g_subpage = SUBPAGE_HIST_TWS;
+
+    displayUpdate(true);
+}
+
+void handleSogCallback(void* user) {
+    g_subpage = SUBPAGE_HIST_SOG;
+
+    displayUpdate(true);
+}
+
+void handleTimeCallback(void* user) {
+    g_selLogEntry = 0;
+    g_subpage = SUBPAGE_POS_LOG;
+    g_tripResetConfirmation = false;
+
+    displayUpdate(true);
+}
+
+void handleLogResetCallback(void* user) {
+   if (g_tripResetConfirmation) {
+        g_tripLog.duration = 0;
+        g_tripLog.distance = 0.0;
+        g_prefs.putUInt("tripLogTime", g_tripLog.duration);
+        g_prefs.putFloat("tripLogDist", g_tripLog.distance);
+        g_tripResetConfirmation = false;
+    }
+    else {
+        g_tripResetConfirmation = true;
+    }
+}
+
+void handleRangeCallback(void* user) {
+    // Cycle through ranges
+    if (g_aisRange == 1.0) {
+        g_aisRange = 12.0;
+    }
+    else if (g_aisRange == 3.0) {
+        g_aisRange = 1.0;
+    }
+    else {
+        g_aisRange = g_aisRange / 2.0;
+    }
+
+    displayUpdate(true);
+}
+
+void handleSelectCallback(void* user) {
+    // Cycle forward through targets
+    setTarget(cycleAisTarget(g_targets, g_selTarget));
+
+    displayUpdate(true);
+}
+
+void handleDetailCallback(void* user) {
+    g_subpage = SUBPAGE_AIS_INFO;
+
+    displayUpdate(true);
+}
+
+void handleSubTitleCallback(void* user) {
+    switch (g_subpage) {
+        case SUBPAGE_HIST_AWS:
+        case SUBPAGE_HIST_TWS:
+        case SUBPAGE_HIST_SOG:
+        case SUBPAGE_HIST_DEPTH:
+            {
+                int sub = (int)g_subpage + 1;
+                if (sub >= SUBPAGE_HIST_SEPARATOR) {
+                    sub = SUBPAGE_HIST_AWS;
+                }
+                g_subpage = (Subpage)sub;
+            }
+            break;
+
+        case SUBPAGE_POS_LOG:
+            {
+                unsigned int ix = (g_selLogEntry + 1) % NUM_LOG_ENTRIES;
+                if (g_logEntries[ix].bInUse == false) {
+                    ix = 0;
+                }
+                g_selLogEntry = ix;
+            }
+            break;
+
+        case SUBPAGE_AIS_INFO:
+            // Cycle forward through targets
+            setTarget(cycleAisTarget(g_targets, g_selTarget));
+            break;
+    }
+
+    displayUpdate(true);
+}
+
+void handleSubBodyCallback(void* user) {
+    g_subpage = SUBPAGE_NONE;
+
+    displayUpdate(true);
+}
+
+
+void drawArrowRight(int16_t x, int16_t y) {
+    g_tft.drawWideLine(x - ARROW_WIDTH, y - ARROW_HEIGHT / 2, x, y, 5, TFT_DARKGREY);
+    g_tft.drawWideLine(x, y, x - ARROW_WIDTH, y + ARROW_HEIGHT / 2, 5, TFT_DARKGREY);
+}
+
+
 const N2kAISTarget* cycleAisTarget(const std::list<std::unique_ptr<N2kAISTarget>>& targets,
-                                   uint32_t selMmsi, Page page) {
+                                   uint32_t selMmsi) {
     const N2kAISTarget* last = nullptr;
 
     for (auto& t : targets) {
-        if (!isVisibleTarget(t.get(), page)) {
+        if (!isVisibleTarget(t.get())) {
             continue;
         }
 
@@ -574,10 +604,6 @@ bool updateCallback(void* user) {
     g_sogHistory.updateData(g_localVelocity.getMagnitude());
     g_depthHistory.updateData(g_depth);
 
-    if (g_subpage >= SUBPAGE_HIST_AWS && g_subpage < SUBPAGE_HIST_SEPARATOR) {
-        bChanged = true;
-    }
-
     if (bChanged) {
         displayUpdate(true);
     }
@@ -601,47 +627,11 @@ bool historyCallback(void* user) {
         g_lastPos = g_localPos;
     }
 
-    // Sample environment sensors at the same time.
-    readEnvironmentalSensors();
-
     // Force a display refresh every so often even if we're not receiving data
     displayUpdate(true);
 
     // Continue running
     return true;
-}
-
-void readEnvironmentalSensors() {
-#if (defined HAS_BMP580)
-    if (g_envSensor.dataReady() && g_envSensor.performReading()) {
-#ifdef USE_METRIC_PRESSURE
-        // Leave pressure in millibars
-        g_envAtmPressure = g_envSensor.pressure;
-#else
-        // Convert to inHg
-        g_envAtmPressure = millibars2inHg(g_envSensor.pressure);
-#endif
-#ifdef USE_METRIC
-        // Leave temp in Celcius
-        g_envAtmTemp = g_envSensor.temperature;
-#else
-        // Convert temp to Farenheit.
-        g_envAtmTemp = celcius2Farenheit(g_envSensor.temperature);
-#endif
-    }
-#elif (defined HAS_BME280)
-#ifdef USE_METRIC_PRESSURE
-    g_envAtmPressure = g_envSensor.readPressure() / 100.0;
-#else
-    g_envAtmPressure = millibars2inHg(g_envSensor.readPressure() / 100.0);
-#endif
-#ifdef USE_METRIC
-    g_envAtmTemp = g_envSensor.readTemperature();
-#else
-    g_envAtmTemp = celcius2Farenheit(g_envSensor.readTemperature());
-#endif
-    g_envAtmHumidity = g_envSensor.readHumidity();
-#endif
 }
 
 bool logCallback(void* user) {
@@ -666,53 +656,29 @@ bool logEntryCallback(void* user) {
 }
 
 void displaySplashScreen() {
-  g_tft.setTextWrap(false);
-  g_tft.fillScreen(ST77XX_BLACK);
-  g_tft.setCursor(0, 60);
+    g_tft.fillScreen(TFT_BLACK);
 
-  g_tft.setTextColor(ST77XX_GREEN);
-  g_tft.setTextSize(3);
-  g_tft.println("Hello Michael");
+    // Version in bottom right
+    g_tft.setFreeFont(FONT_SMALL);
+    g_tft.setTextSize(1);
+    g_tft.setTextColor(TFT_YELLOW);
 
-  g_tft.setTextColor(ST77XX_YELLOW);
-  g_tft.setTextSize(1);
-  drawJustifiedText(VERSION_NUM, DISPLAY_WIDTH, DISPLAY_HEIGHT, TXT_JUSTIFIED);
-}
+    g_tft.setTextDatum(BR_DATUM);
+    g_tft.drawString(VERSION_NUM, DISPLAY_WIDTH, DISPLAY_HEIGHT, GFXFF);
 
-// Helper function to print text using a calculated starting position based on
-// its length and a layout option.
-void drawJustifiedText(const char* str, int x, int y, TextLayout fmt) {
-    int16_t minx;
-    int16_t miny;
-    uint16_t w;
-    uint16_t h;
+    // Welcome message centered
+    g_tft.setFreeFont(FONT_MEDIUM);
+    g_tft.setTextColor(TFT_GREEN, TFT_BLACK);
 
-    g_tft.getTextBounds(str, 0, 0, &minx, &miny, &w, &h);
-    switch (fmt) {
-        // x and y are either 0 or the rightmost/bottommost extent of the justified
-        // text respectively. This allows text to be placed flush with the edge of
-        // the display in all 4 corners.
-        case TXT_JUSTIFIED:
-            if (x) {
-                x -= w + 1;
-            }
-            if (y) {
-                y -= h + 1;
-            }
-            break;
+    g_tft.setTextDatum(MC_DATUM);
+    g_tft.drawString("Hello Michael", DISPLAY_WIDTH / 2, DISPLAY_HEIGHT / 2, GFXFF);
 
-        case TXT_CENTERED:
-            // Note y is not adjusted, to allow manual vertical placement.
-            x -= (w + 1) / 2;
-            break;
-    }
-    g_tft.setCursor(x, y);
-    g_tft.print(str);
+    g_tft.setTextDatum(TL_DATUM);
 }
 
 // Helper function to print a floating point value using a calculated starting
 // position based on its displayed length and a layout option.
-void drawJustifiedVal(double val, int precision, const char* suffix, int x, int y, TextLayout fmt) {
+void drawJustifiedVal(double val, int precision, const char* suffix, int x, int y, int datum) {
     char str[64];
 
     if (!suffix) {
@@ -720,102 +686,122 @@ void drawJustifiedVal(double val, int precision, const char* suffix, int x, int 
     }
 
     int rc = snprintf(str, sizeof(str), "%.*f%s", precision, val, suffix);
-    drawJustifiedText(str, x, y, fmt);
+
+    g_tft.setTextDatum(datum);
+    g_tft.drawString(str, x, y);
 }
 
 
 //
 // Wind info top-level page.
 //
-// D1 switches to history subpages.
-// D2 cycles to next top-level page.
 void displayPageWind() {
-    struct HistWindowContext hist_window;
+    const int radius = 90;
+    GraphWidget graph1(&g_tft);
+    GraphWidget graph2(&g_tft);
 
     int x0 = DISPLAY_WIDTH / 2;
     int y0 = DISPLAY_HEIGHT / 2;
 
     g_tft.setTextWrap(false);
-    g_tft.fillScreen(ST77XX_BLACK);
+
+    // Wind info in large font
+    g_tft.setFreeFont(FONT_LARGE);
+
+    g_tft.fillScreen(TFT_BLACK);
+
+#ifdef TESTING
+    // Draw touch rects
+    drawTouchRect(&g_nextPageRect);
+    drawTouchRect(&g_awsRect);
+    drawTouchRect(&g_twsRect);
+    drawTouchRect(&g_depthRect);
+    drawTouchRect(&g_sogRect);
+#endif
 
     // AWS history top left
-    hist_window.color = ST77XX_RED;
-    hist_window.x = 0; // 60 - g_awsHistory.getLength();
-    hist_window.y = 30;
-    hist_window.w = 60;
-    hist_window.h = 30;
-    hist_window.range_x = g_awsHistory.getSize();
-    hist_window.range_y = hist_window.h;
-    g_awsHistory.forEachData(drawHistoryCallback, &hist_window);
+    graph1.createGraph(60, 30, TFT_BLACK);
+
+    // x scale units is from 60mins to 0, y scale unit is 0 to max val
+    graph1.setGraphScale(0.0, 60.0, 0.0, 30.0);
+    graph1.setGraphGrid(0.0, 10.0, 0.0, 10.0, TFT_RED);
+
+    graph1.drawGraph(0, 0 + FONT_LARGE_ADJ_HEIGHT + FONT_SMALL_ADJ_HEIGHT + 1);
+    g_awsHistory.forEachData(drawHistoryCallback, &graph1);
 
     // TWS history bottom left
-    hist_window.color = ST77XX_BLUE;
-    hist_window.x = 0; // 60 - g_twsHistory.getLength();
-    hist_window.y = 70;
-    hist_window.w = 60;
-    hist_window.h = 30;
-    hist_window.range_x = g_twsHistory.getSize();
-    hist_window.range_y = hist_window.h;
-    g_twsHistory.forEachData(drawHistoryCallback, &hist_window);
+    graph2.createGraph(60, 30, TFT_BLACK);
+
+    // x scale units is from -60mins to 0, y scale unit is 0 to max val
+    graph2.setGraphScale(0.0, 60.0, 0.0, 30.0);
+    graph2.setGraphGrid(0.0, 10.0, 0.0, 10.0, TFT_BLUE);
+
+    graph2.drawGraph(0, DISPLAY_HEIGHT - FONT_LARGE_ADJ_HEIGHT - FONT_SMALL_ADJ_HEIGHT - 35);
+    g_twsHistory.forEachData(drawHistoryCallback, &graph2);
 
     g_tft.startWrite();
     // Draw port quadrants in red
-    g_tft.drawCircleHelper(x0, y0, 59, 0x1, ST77XX_RED);
-    g_tft.drawCircleHelper(x0, y0, 59, 0x8, ST77XX_RED);
-    g_tft.drawCircleHelper(x0, y0, 58, 0x1, ST77XX_RED);
-    g_tft.drawCircleHelper(x0, y0, 58, 0x8, ST77XX_RED);
+    g_tft.drawCircleHelper(x0, y0, radius, 0x1, TFT_RED);
+    g_tft.drawCircleHelper(x0, y0, radius, 0x8, TFT_RED);
+    g_tft.drawCircleHelper(x0, y0, radius - 1, 0x1, TFT_RED);
+    g_tft.drawCircleHelper(x0, y0, radius - 1, 0x8, TFT_RED);
     // Draw starboard quadrants in green
-    g_tft.drawCircleHelper(x0, y0, 59, 0x2, ST77XX_GREEN);
-    g_tft.drawCircleHelper(x0, y0, 59, 0x4, ST77XX_GREEN);
-    g_tft.drawCircleHelper(x0, y0, 58, 0x2, ST77XX_GREEN);
-    g_tft.drawCircleHelper(x0, y0, 58, 0x4, ST77XX_GREEN);
+    g_tft.drawCircleHelper(x0, y0, radius, 0x2, TFT_GREEN);
+    g_tft.drawCircleHelper(x0, y0, radius, 0x4, TFT_GREEN);
+    g_tft.drawCircleHelper(x0, y0, radius - 1, 0x2, TFT_GREEN);
+    g_tft.drawCircleHelper(x0, y0, radius - 1, 0x4, TFT_GREEN);
     g_tft.endWrite();
 
     for (int d = 0; d < 360; d += 10) {
-        drawRadial(x0,  y0,  57,  d,  2,  ST77XX_WHITE);
+        drawRadial(x0,  y0,  radius - 2,  d,  2,  TFT_WHITE);
     }
     for (int d = 0; d < 360; d += 30) {
-        drawRadial(x0,  y0,  57,  d,  6,  ST77XX_WHITE);
+        drawRadial(x0,  y0,  radius - 2,  d,  6,  TFT_WHITE);
     }
 
-    drawRadial(x0, y0, 50, g_appWind.getBearing(), 20, ST77XX_WHITE);
+    drawRadial(x0, y0, radius - 10, g_appWind.getBearing(), radius / 2 - 10, TFT_WHITE);
 
     // Apparent wind speed and angle at top
-    g_tft.setTextColor(ST77XX_RED);
-    g_tft.setTextSize(3);
-    g_tft.setCursor(0, 0);
-    g_tft.print(g_appWind.getMagnitude(), 1);
-
-    drawJustifiedVal(g_appWind.getSignedBearing(), 0, g_degStr, DISPLAY_WIDTH, 0, TXT_JUSTIFIED);
-    g_tft.setTextSize(1);
-    g_tft.setCursor(DISPLAY_WIDTH - 18, 24);
-    g_tft.print("AWA");
+    g_tft.setTextColor(TFT_RED);
+    drawJustifiedVal(g_appWind.getMagnitude(), 1, "", 0, 0, TL_DATUM);
+    drawJustifiedVal(g_appWind.getSignedBearing(), 0, "~", DISPLAY_WIDTH, 0, TR_DATUM);
 
     // True wind speed and angle at bottom
-    g_tft.setTextColor(ST77XX_BLUE);
-    g_tft.setTextSize(3);
-    g_tft.setCursor(0, 112);
-    g_tft.print(g_trueWind.getMagnitude(), 1);
-
-    g_tft.setTextSize(1);
-    g_tft.setCursor(DISPLAY_WIDTH - 18, DISPLAY_HEIGHT - 36);
-    g_tft.print("TWA");
-    g_tft.setTextSize(3);
-    drawJustifiedVal(g_trueWind.getSignedBearing(), 0, g_degStr, DISPLAY_WIDTH, DISPLAY_HEIGHT, TXT_JUSTIFIED);
+    g_tft.setTextColor(TFT_BLUE);
+    drawJustifiedVal(g_trueWind.getMagnitude(), 1, "", 0, DISPLAY_HEIGHT, BL_DATUM);
+    drawJustifiedVal(g_trueWind.getSignedBearing(), 0, "~", DISPLAY_WIDTH, DISPLAY_HEIGHT, BR_DATUM);
 
     // Local SOG and COG in center of dial
-    g_tft.setTextColor(ST77XX_YELLOW);
-    g_tft.setTextSize(2);
-    drawJustifiedVal(g_localVelocity.getMagnitude(), 1, nullptr, x0, y0 - 15, TXT_CENTERED);
-    drawJustifiedVal(g_localVelocity.getBearing(), 0, g_degStr, x0, y0 + 5, TXT_CENTERED);
+    g_tft.setTextColor(TFT_YELLOW);
+    drawJustifiedVal(g_localVelocity.getMagnitude(), 1, nullptr, x0, y0 - FONT_LARGE_ADJ_HEIGHT / 2, MC_DATUM);
+    drawJustifiedVal(g_localVelocity.getBearing(), 0, "~", x0, y0 + FONT_LARGE_ADJ_HEIGHT / 2, MC_DATUM);
 
-    // Depth to right of dial
+    // Depth to left of dial
     int precision = g_depth >= 100.0 ? 0 : 1;
-    g_tft.setTextColor(ST77XX_GREEN);
-    g_tft.setTextSize(2);
-    drawJustifiedVal(g_depth, precision, nullptr, DISPLAY_WIDTH, 70, TXT_JUSTIFIED);
-    g_tft.setTextSize(1);
-    drawJustifiedText(g_unitsDepth, DISPLAY_WIDTH, 78, TXT_JUSTIFIED);
+    g_tft.setTextColor(TFT_GREEN);
+    drawJustifiedVal(g_depth, precision, nullptr, 0, y0 - 10, ML_DATUM);
+
+    // Draw labels and units in smallest font
+    g_tft.setFreeFont(FONT_SMALL);
+
+    g_tft.setTextColor(TFT_RED);
+    g_tft.setTextDatum(TL_DATUM);
+    g_tft.drawString("AWS", 0, FONT_LARGE_ADJ_HEIGHT);
+    g_tft.setTextDatum(TR_DATUM);
+    g_tft.drawString("AWA", DISPLAY_WIDTH, FONT_LARGE_ADJ_HEIGHT);
+
+    g_tft.setTextColor(TFT_BLUE);
+    g_tft.setTextDatum(BL_DATUM);
+    g_tft.drawString("TWS", 0, DISPLAY_HEIGHT - FONT_LARGE_ADJ_HEIGHT);
+    g_tft.setTextDatum(BR_DATUM);
+    g_tft.drawString("TWA", DISPLAY_WIDTH, DISPLAY_HEIGHT - FONT_LARGE_ADJ_HEIGHT);
+
+    g_tft.setTextColor(TFT_GREEN);
+    g_tft.setTextDatum(ML_DATUM);
+    g_tft.drawString(g_unitsDepth, 0, y0 + FONT_LARGE_ADJ_HEIGHT - 20);
+
+    // Next page arrow center right
+    drawArrowRight(DISPLAY_WIDTH - 15, DISPLAY_HEIGHT / 2);
 }
 
 // Helper function to draw a partial radial of a circle of radius r at x0, y0.
@@ -853,29 +839,26 @@ void statsHistoryCallback(void* user, const double* dataMin, const double* dataM
         ctx->bFirst = false;
     }
 
-    if (ctx->len && offset + len == ctx->len) {
+    if (ctx->len && offset != 0) {
         // We're finished.
         ctx->avg = ctx->avg / (2 * ctx->len);
     }
 }
 
-// Callback to draw history data scaled to the display window defined in the
-// context structure. Note that if data points exceed range_x (in number) or
-// range_y (in value) then drawing will exceed the defined window.
+// Callback to draw history data in the graph object provided.
 void drawHistoryCallback(void* user, const double* dataMin, const double* dataMax,
                          size_t len, size_t offset) {
-    HistWindowContext* ctx = (HistWindowContext *)user;
+    GraphWidget* p_gr = (GraphWidget*)user;
+    uint16_t gr_x, gr_y;
 
-    double scale_x = ctx->w / ctx->range_x;
-    double scale_y = ctx->h / ctx->range_y;
+    p_gr->getGraphPosition(&gr_x, &gr_y);
 
     for (unsigned int i = 0; i < len; i++) {
-        int16_t dmax = round(dataMax[i] * scale_y);
-        int16_t dmin = round(dataMin[i] * scale_y);
+        int16_t x = p_gr->getPointX(offset + i);
+        int16_t y = p_gr->getPointY(dataMax[i]);
+        int32_t h = p_gr->getPointY(dataMin[i]) - y + 1;
 
-        g_tft.drawFastVLine(ctx->x + round((offset + i) * scale_x),
-                            ctx->y + ctx->h - dmax,
-                            dmax - dmin + 1, ctx->color);
+        g_tft.drawFastVLine(x, y, h, TFT_WHITE);
     }
 }
 
@@ -883,63 +866,51 @@ void drawHistoryCallback(void* user, const double* dataMin, const double* dataMa
 //
 // Wind subpage to display data history detail.
 //
-// D0 to cycle through each history subpage.
-// D1 to exit back to top level AIS page.
 void displaySubpageHistory(const char* title, const MinMaxDataHistory<double>* hist, uint16_t color) {
     struct HistStatsContext hist_stats;
-    struct HistWindowContext hist_window;
+    double maxVal = 0.0;
+    GraphWidget graph(&g_tft);
+    char buffer[64];
 
+    g_tft.setTextDatum(TL_DATUM);
     g_tft.setTextWrap(false);
-    g_tft.fillScreen(ST77XX_BLACK);
+    g_tft.setFreeFont(FONT_LARGE);
 
     // Calculate history statistics.
     hist_stats.len = hist->getLength();
     hist->forEachData(statsHistoryCallback, &hist_stats);
 
-    // Vertical scale: a series of horizontal lines every 10 units.
-    int t = ((int)hist_stats.max / 10) * 10;
-    while (t > 0) {
-        g_tft.drawFastHLine(0, DISPLAY_HEIGHT - 3 - round(t * (DISPLAY_HEIGHT - 3) / hist_stats.max),
-                          DISPLAY_WIDTH, ST77XX_WHITE);
-        t -= 10;
-    }
+    // Round max up to nearest decade
+    maxVal = 10.0 * (int)ceil(hist_stats.max / 10.0);
 
-    // Horizontal scale: a series of ticks every 10 units.
-    g_tft.drawFastHLine(0, DISPLAY_HEIGHT - 3, DISPLAY_WIDTH, ST77XX_WHITE);
-    for (t = 0; t < hist->getSize(); t += 10) {
-        g_tft.drawFastVLine(DISPLAY_WIDTH - round(t * DISPLAY_WIDTH / hist->getSize()),
-                          DISPLAY_HEIGHT - 2, 2, ST77XX_WHITE);
-    }
+    g_tft.fillScreen(TFT_BLACK);
+#ifdef TESTING
+    // Draw touch rects
+    drawTouchRect(&g_subTitleRect);
+#endif
+
+    graph.createGraph(DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - FONT_LARGE_ADJ_HEIGHT - 1, TFT_BLACK);
+
+    // x scale units is from 0 to 60mins, y scale unit is 0 to max val
+    graph.setGraphScale(0.0, 60.0, 0.0, maxVal);
+    graph.setGraphGrid(0.0, 10.0, 0.0, 10.0, color);
+
+    graph.drawGraph(0, FONT_LARGE_ADJ_HEIGHT);
 
     // Title at top-left
     g_tft.setTextColor(color);
-    g_tft.setTextSize(3);
-    g_tft.setCursor(0, 0);
-    g_tft.print(title);
+    g_tft.drawString(title, 0, 0);
 
-    // Stats at bottom-left
-    g_tft.setTextSize(2);
-    g_tft.setCursor(0, DISPLAY_HEIGHT - 54);
-    g_tft.print("Max ");
-    g_tft.println(hist_stats.max, 0);
-
-    g_tft.print("Avg ");
-    g_tft.println(hist_stats.avg, 0);
-
-    g_tft.print("Min ");
-    g_tft.println(hist_stats.min, 0);
+    // Stats at top-right, but aligned to top of graph
+    g_tft.setFreeFont(FONT_MEDIUM);
+    g_tft.setTextDatum(BR_DATUM);
+    buffer[0] = '\0';
+    snprintf(buffer, sizeof(buffer), "Min %.0f Max %.0f Avg %.0f",
+             round(hist_stats.min), round(hist_stats.max), round(hist_stats.avg));
+    g_tft.drawString(buffer, DISPLAY_WIDTH, FONT_LARGE_ADJ_HEIGHT - 1);
 
     // Draw history data
-    double scale_x = DISPLAY_WIDTH / hist->getSize();
-    hist_window.color = color;
-    hist_window.x = DISPLAY_WIDTH - round(hist->getLength() * scale_x);
-    hist_window.y = 0;
-    hist_window.w = DISPLAY_WIDTH;
-    hist_window.h = DISPLAY_HEIGHT - 3;
-    hist_window.range_x = hist->getSize();
-    hist_window.range_y = hist_stats.max;
-
-    hist->forEachData(drawHistoryCallback, &hist_window);
+    hist->forEachData(drawHistoryCallback, &graph);
 }
 
 //
@@ -950,16 +921,34 @@ void displaySubpageHistory(const char* title, const MinMaxDataHistory<double>* h
 //
 void displayPagePosition() {
     char buffer[128];
+    int row = 0;
+    int offset = 0;
     char atmTemp[4] = "-";
     char seaTemp[4] = "-";
     unsigned int now;
 
-    g_tft.setTextWrap(false);
-    g_tft.fillScreen(ST77XX_BLACK);
-    g_tft.setCursor(0, 0);
-    g_tft.setTextSize(2);
+    // Annoyingly, GFXFF fonts use the font baseline instead of top-left as the
+    // cursor position. In addition the GNU FreeFonts used by GFXFF have a
+    // significant line gap, which makes lines of text feel drafty and is less
+    // compact. So for all these reasons, we abandon the use of setCursor and
+    // println(), and instead manually keep track of our text rows and use a modified
+    // font height.
 
-    g_tft.setTextColor(ST77XX_WHITE);
+    // We rely on using custom GFX fonts with '~' replaced by '°' so we can display bearings
+    // without jumping through enormous hoops.
+    g_tft.setTextDatum(TL_DATUM);
+    g_tft.setTextWrap(false);
+    g_tft.setFreeFont(FONT_MEDIUM);
+
+    g_tft.fillScreen(TFT_BLACK);
+
+#ifdef TESTING
+    // Draw touch rects
+    drawTouchRect(&g_timeRect);
+    drawTouchRect(&g_logResetRect);
+#endif
+
+    g_tft.setTextColor(TFT_WHITE);
 
     // Current time
     now = g_secsSinceMidnight;
@@ -969,9 +958,13 @@ void displayPagePosition() {
     snprintf(buffer, sizeof(buffer), "%02d:%02d:%02d %s",
              now / 3600, (now % 3600) / 60, now % 60,
              g_tzOffset ? "LOC" : "UTC");
-    g_tft.println(buffer);
+    g_tft.drawString(buffer, 0, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
+    row += 2;
 
     // Atmospheric data in top-right
+    g_tft.setTextDatum(TR_DATUM);
+
+    // Temp
     if (!std::isnan(g_envAtmTemp)) {
         snprintf(atmTemp, sizeof(atmTemp), "%.0f", g_envAtmTemp);
     }
@@ -981,37 +974,45 @@ void displayPagePosition() {
 
     buffer[0] = '\0';
     snprintf(buffer, sizeof(buffer), "%s/%s%s", atmTemp, seaTemp, g_unitsTemp);
-    drawJustifiedText(buffer, DISPLAY_WIDTH, 0, TXT_JUSTIFIED);
+    g_tft.drawString(buffer, DISPLAY_WIDTH, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
+    row++;
 
+    // Pressure
     if (!std::isnan(g_envAtmPressure)) {
         buffer[0] = '\0';
         snprintf(buffer, sizeof(buffer), "%.*f%s", g_precPressure, g_envAtmPressure,
                  g_unitsPressure);
-        drawJustifiedText(buffer, DISPLAY_WIDTH, 32, TXT_JUSTIFIED);
+        g_tft.drawString(buffer, DISPLAY_WIDTH, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
     }
+    row++;
+
+    // Humidity
     if (!std::isnan(g_envAtmHumidity)) {
         buffer[0] = '\0';
         snprintf(buffer, sizeof(buffer), "%.0f%%", g_envAtmHumidity);
-        drawJustifiedText(buffer, DISPLAY_WIDTH, 48, TXT_JUSTIFIED);
+        g_tft.drawString(buffer, DISPLAY_WIDTH, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
     }
 
+    // Position below time on the left
+    g_tft.setTextDatum(TL_DATUM);
+    row = 2;
+
     // Position in cyan
-    g_tft.setTextColor(ST77XX_CYAN);
-    // Add a small gap for improved readability
-    g_tft.setCursor(0, 21);
+    g_tft.setTextColor(TFT_CYAN);
 
     // GPS Position
     if (g_bPosValid) {
         buffer[0] = '\0';
         g_localPos.toString(buffer, sizeof(buffer), N2kPos::FMT_LAT_ONLY);
-        g_tft.println(buffer);
+        g_tft.drawString(buffer, 0, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
         buffer[0] = '\0';
         g_localPos.toString(buffer, sizeof(buffer), N2kPos::FMT_LON_ONLY);
-        g_tft.println(buffer);
+        g_tft.drawString(buffer, 0, (row + 1) * FONT_MEDIUM_ADJ_HEIGHT + offset);
     }
+    row += 2;
 
-    // Add a small gap for improved readability
-    g_tft.setCursor(0, 56);
+    // Add another small gap for improved readability
+    offset += 5;
 
     // Trip data
     buffer[0] = '\0';
@@ -1019,19 +1020,20 @@ void displayPagePosition() {
         snprintf(buffer, sizeof(buffer), "Press again to RESET");
     }
     else {
-        snprintf(buffer, sizeof(buffer), "LOG %.1fnm %u:%02uhrs",
+        snprintf(buffer, sizeof(buffer), "LOG %.1fnm  %u:%02uhrs",
                  g_tripLog.distance,
                  g_tripLog.duration / 3600, (g_tripLog.duration % 3600) / 60);
     }
-    g_tft.println(buffer);
+    g_tft.drawString(buffer, 0, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
+    row++;
 
-    g_tft.setTextColor(ST77XX_YELLOW);
+    g_tft.setTextColor(TFT_YELLOW);
     // Heading and course
     buffer[0] = '\0';
-    snprintf(buffer, sizeof(buffer), "HDG %.0f%s COG %.0f%s",
-             g_hdg, g_degStr,
-             g_localVelocity.getBearing(), g_degStr);
-    g_tft.println(buffer);
+    snprintf(buffer, sizeof(buffer), "HDG %.0f~    COG %.0f~",
+             g_hdg, g_localVelocity.getBearing());
+    g_tft.drawString(buffer, 0, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
+    row++;
 
     // SOG and trip average
     float avg = 0.0;
@@ -1040,45 +1042,59 @@ void displayPagePosition() {
     if (g_tripLog.duration > 0.0) {
         avg = g_tripLog.distance * 3600 / g_tripLog.duration;
     }
-    snprintf(buffer, sizeof(buffer), "SOG %.1fkts AVG %.1f",
+    snprintf(buffer, sizeof(buffer), "SOG %.1fkts  AVG %.1fkts",
              g_localVelocity.getMagnitude(), avg);
-    g_tft.println(buffer);
+    g_tft.drawString(buffer, 0, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
+    row++;
 
     // Apparent wind angle and speed in red
-    g_tft.setTextColor(ST77XX_RED);
+    g_tft.setTextColor(TFT_RED);
     buffer[0] = '\0';
-    snprintf(buffer, sizeof(buffer), "AWS %.0fkts AWA %.0f%s",
-             g_appWind.getMagnitude(), g_appWind.getSignedBearing(), g_degStr);
-    g_tft.println(buffer);
+    snprintf(buffer, sizeof(buffer), "AWS %.0fkts    AWA %.0f~",
+             g_appWind.getMagnitude(), g_appWind.getSignedBearing());
+    g_tft.drawString(buffer, 0, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
+    row++;
 
     // True wind direction and speed in blue
-    g_tft.setTextColor(ST77XX_BLUE);
+    g_tft.setTextColor(TFT_BLUE);
     N2kVector trueWind;
     trueWind = calcTrueWind(&g_appWind, g_localVelocity.getMagnitude(), g_hdg);
     buffer[0] = '\0';
-    snprintf(buffer, sizeof(buffer), "TWS %.0fkts TWD %.0f%s",
-             trueWind.getMagnitude(), trueWind.getBearing(), g_degStr);
-    g_tft.println(buffer);
+    snprintf(buffer, sizeof(buffer), "TWS %.0fkts    TWD %.0f~",
+             trueWind.getMagnitude(), trueWind.getBearing());
+    g_tft.drawString(buffer, 0, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
+    row++;
+
+
+    // Next page arrow center right
+    drawArrowRight(DISPLAY_WIDTH - 15, DISPLAY_HEIGHT / 2);
 }
 
 //
 // Log entry subpage.
 //
 // Displays saved on-the-hour logbook data.
-// D0 cycles over the last 4 hours.
 //
 void displaySubpageLog() {
     char buffer[128];
+    int row = 0;
+    int offset = 0;
     char atmTemp[4] = "-";
     char seaTemp[4] = "-";
     const LogEntry* ent;
 
+    g_tft.setTextDatum(TL_DATUM);
     g_tft.setTextWrap(false);
-    g_tft.fillScreen(ST77XX_BLACK);
-    g_tft.setCursor(0, 0);
-    g_tft.setTextSize(2);
-    g_tft.setTextColor(ST77XX_YELLOW);
+    g_tft.setFreeFont(FONT_MEDIUM);
 
+    g_tft.fillScreen(TFT_BLACK);
+
+#ifdef TESTING
+    // Draw touch rects
+    drawTouchRect(&g_subTitleRect);
+#endif
+
+    g_tft.setTextColor(TFT_YELLOW);
     ent = getLogEntry(g_selLogEntry);
 
     if (ent) {
@@ -1091,8 +1107,10 @@ void displaySubpageLog() {
             snprintf(buffer, sizeof(buffer), "%02d:%02d UTC", ent->timestamp / 60,
                      ent->timestamp % 60);
         }
-        g_tft.println(buffer);
-        g_tft.setTextColor(ST77XX_WHITE);
+        g_tft.drawString(buffer, 0, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
+        row += 2;
+
+        g_tft.setTextColor(TFT_WHITE);
 
         if (!std::isnan(ent->atmTemp)) {
             snprintf(atmTemp, sizeof(atmTemp), "%.0f", ent->atmTemp);
@@ -1101,57 +1119,68 @@ void displaySubpageLog() {
             snprintf(seaTemp, sizeof(seaTemp), "%.0f", ent->seaTemp);
         }
 
+        g_tft.setTextDatum(TR_DATUM);
         buffer[0] = '\0';
         snprintf(buffer, sizeof(buffer), "%s/%s%s", atmTemp, seaTemp, g_unitsTemp);
-        drawJustifiedText(buffer, DISPLAY_WIDTH, 0, TXT_JUSTIFIED);
-
-        // Add a small gap for improved readability
-        g_tft.setCursor(0, 21);
-        buffer[0] = '\0';
-        ent->position.toString(buffer, sizeof(buffer), N2kPos::FMT_LAT_ONLY);
-        g_tft.println(buffer);
-        buffer[0] = '\0';
-        ent->position.toString(buffer, sizeof(buffer), N2kPos::FMT_LON_ONLY);
-        g_tft.println(buffer);
+        g_tft.drawString(buffer, DISPLAY_WIDTH, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
+        row++;
 
         if (!std::isnan(ent->atmPressure)) {
             buffer[0] = '\0';
             snprintf(buffer, sizeof(buffer), "%.*f%s", g_precPressure, ent->atmPressure,
                      g_unitsPressure);
-            drawJustifiedText(buffer, DISPLAY_WIDTH, 21 + 16, TXT_JUSTIFIED);
+            g_tft.drawString(buffer, DISPLAY_WIDTH, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
+            row++;
         }
 
+        g_tft.setTextDatum(TL_DATUM);
+        row = 2;
+
+        buffer[0] = '\0';
+        ent->position.toString(buffer, sizeof(buffer), N2kPos::FMT_LAT_ONLY);
+        g_tft.drawString(buffer, 0, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
+        row++;
+
+        buffer[0] = '\0';
+        ent->position.toString(buffer, sizeof(buffer), N2kPos::FMT_LON_ONLY);
+        g_tft.drawString(buffer, 0, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
+        row++;
+
         // Add a small gap for improved readability
-        g_tft.setCursor(0, 56);
+        offset += 5;
 
         buffer[0] = '\0';
         snprintf(buffer, sizeof(buffer), "LOG %.1fnm",
                  ent->logData.distance);
-        g_tft.println(buffer);
+        g_tft.drawString(buffer, 0, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
+        row++;
 
         buffer[0] = '\0';
-        snprintf(buffer, sizeof(buffer), "SOG %.1fkts COG %.0f%s",
+        snprintf(buffer, sizeof(buffer), "SOG %.1fkts COG %.0f~",
                  ent->velocity.getMagnitude(),
-                 ent->velocity.getBearing(), g_degStr);
-        g_tft.println(buffer);
+                 ent->velocity.getBearing());
+        g_tft.drawString(buffer, 0, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
+        row++;
 
         buffer[0] = '\0';
-        snprintf(buffer, sizeof(buffer), "AWS %.0fkts AWA %.0f%s",
+        snprintf(buffer, sizeof(buffer), "AWS %.0fkts   AWA %.0f~",
                  ent->appWind.getMagnitude(),
-                 ent->appWind.getSignedBearing(), g_degStr);
-        g_tft.println(buffer);
+                 ent->appWind.getSignedBearing());
+        g_tft.drawString(buffer, 0, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
+        row++;
 
         N2kVector trueWind;
         trueWind = calcTrueWind(&ent->appWind, ent->velocity.getMagnitude(), ent->heading);
 
         buffer[0] = '\0';
-        snprintf(buffer, sizeof(buffer), "TWS %.0fkts TWD %.0f%s",
+        snprintf(buffer, sizeof(buffer), "TWS %.0fkts   TWD %.0f~",
                  trueWind.getMagnitude(),
-                 trueWind.getBearing(), g_degStr);
-        g_tft.println(buffer);
+                 trueWind.getBearing());
+        g_tft.drawString(buffer, 0, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
+        row++;
     }
     else {
-        g_tft.println("No log entries");
+        g_tft.drawString("No log entries", 0, 0);
     }
 }
 
@@ -1215,67 +1244,53 @@ const LogEntry* getLogEntry(unsigned int n) {
 // Dangerous targets are displayed in red (projected to pass within 1nm in the
 // next 60mins).
 //
-// D0 to cycle through targets displaying vessel name, range and bearing in
-// bottom left.
-//
 // CPA distance and time (mins) is shown in top-right if vessel is
 // converging on our position. Displayed in orange if passing ahead of us,
 // displayed in red if we pass ahead of them (considered more dangerous).
 //
-// D1 to switch to details AIS info subpage for the selected target.
-//
-// D2 cycles to next top-level page.
-void displayPageAis(Page pg, time_t now) {
+void displayPageAis(time_t now) {
     const double radius = DISPLAY_HEIGHT / 2.0 - 7.0;
     int x0 = DISPLAY_WIDTH / 2;
     int y0 = DISPLAY_HEIGHT / 2;
 
-    double range = 12.0;
-    switch (pg) {
-        case PAGE_AIS_12NM:
-            range = 12.0;
-            break;
-
-        case PAGE_AIS_6NM:
-            range = 6.0;
-            break;
-
-        case PAGE_AIS_3NM:
-            range = 3.0;
-            break;
-
-        case PAGE_AIS_1NM:
-            range = 1.0;
-            break;
-    }
-    double range_scale = radius / range;
+    double range_scale = radius / g_aisRange;
     double vector_scale = range_scale / 12.0;;
 
     g_tft.setTextWrap(false);
-    g_tft.fillScreen(ST77XX_BLACK);
+    g_tft.setFreeFont(FONT_LARGE);
+
+    g_tft.fillScreen(TFT_BLACK);
+
+#ifdef TESTING
+    // Draw touch rects
+    drawTouchRect(&g_rangeRect);
+    drawTouchRect(&g_selectRect);
+    drawTouchRect(&g_detailRect);
+#endif
+
 
     // Draw range circles.
-    g_tft.drawCircle(x0, y0, round(range * range_scale), ST77XX_WHITE);
-    g_tft.drawCircle(x0, y0, round(range * 0.67 * range_scale), ST77XX_WHITE);
-    g_tft.drawCircle(x0, y0, round(range * 0.33 * range_scale), ST77XX_WHITE);
+    g_tft.drawCircle(x0, y0, round(g_aisRange * range_scale), TFT_WHITE);
+    g_tft.drawCircle(x0, y0, round(g_aisRange * 0.67 * range_scale), TFT_WHITE);
+    g_tft.drawCircle(x0, y0, round(g_aisRange * 0.33 * range_scale), TFT_WHITE);
 
     // Display page max range top-left.
-    g_tft.setTextColor(ST77XX_WHITE);
-    g_tft.setTextSize(2);
-    g_tft.setCursor(0, 0);
-    g_tft.print(range, 0);
-    g_tft.print("nm");
+    g_tft.setTextColor(TFT_WHITE);
+    drawJustifiedVal(g_aisRange, 0, "nm", 0,  0, TL_DATUM);
+    g_tft.setFreeFont(FONT_MEDIUM);
 
     // Local COG vector at center.
+    g_tft.fillCircle(x0, y0, 3, TFT_YELLOW);
     g_tft.drawLine(x0, y0, x0 + round(g_localVelocity.getX() * vector_scale),
-                 y0 - round(g_localVelocity.getY() * vector_scale), ST77XX_YELLOW);
+                 y0 - round(g_localVelocity.getY() * vector_scale), TFT_YELLOW);
+
 
     // Skip targets until we have local position
     if (g_bPosValid) {
         const N2kAISTarget* target = nullptr;
 
         for (auto& t : g_targets) {
-            if (!isVisibleTarget(t.get(), g_page)) {
+            if (!isVisibleTarget(t.get())) {
                 continue;
             }
 
@@ -1294,50 +1309,61 @@ void displayPageAis(Page pg, time_t now) {
 
             g_tft.fillCircle(x0 + round(p.getX() * range_scale),
                            y0 - round(p.getY() * range_scale),
-                           3, bDangerous ? ST77XX_RED : ST77XX_GREEN);
+                           3, bDangerous ? TFT_RED : TFT_GREEN);
             g_tft.drawLine(x0 + round(p.getX() * range_scale),
                          y0 - round(p.getY() * range_scale),
                          x0 + round(p.getX() * range_scale + v.getX() * vector_scale),
                          y0 - round(p.getY() * range_scale + v.getY() * vector_scale),
-                         ST77XX_YELLOW);
-
+                         TFT_YELLOW);
         }
         if (target) {
             double cpad = target->getCpa()->getDistance();
             double cpab = target->getCpa()->getBearing();
             double cpat = target->getCpa()->getRelTime(now) / 60;
+            bool bDangerous = isDangerousTarget(cpad, cpat);
             bool bTargetPassingAhead = target->getCpa()->getIntersectDeltaTime() < 0;
             const N2kVector &p = target->getRelDistance();
             const N2kVector &v = target->getVelocity();
 
             // Draw vessel info bottom-left
-            g_tft.setTextColor(ST77XX_GREEN);
-            g_tft.setCursor(0, DISPLAY_HEIGHT - 47);
-            g_tft.print(p.getMagnitude(), 2);
-            g_tft.println("nm");
-            g_tft.print(p.getBearing(), 0);
-            g_tft.println(g_degStr);
-            g_tft.print(target->getName());
+            g_tft.setTextColor(TFT_GREEN);
+            drawJustifiedVal(v.getMagnitude(), 0, "kts", 0, DISPLAY_HEIGHT - FONT_MEDIUM_ADJ_HEIGHT * 2, BL_DATUM);
+            drawJustifiedVal(p.getMagnitude(), 2, "nm", 0, DISPLAY_HEIGHT - FONT_MEDIUM_ADJ_HEIGHT, BL_DATUM);
+            drawJustifiedVal(p.getBearing(), 0, "~", 0, DISPLAY_HEIGHT, BL_DATUM);
 
             // Draw CPA info top-right
             if (cpat >= 0.0 && !std::isnan(cpad)) {
-                g_tft.setTextColor(bTargetPassingAhead ? ST77XX_ORANGE : ST77XX_RED);
-                drawJustifiedVal(cpad, 2, "nm", DISPLAY_WIDTH, 0, TXT_JUSTIFIED);
-                drawJustifiedVal(cpab, 0, g_degStr, DISPLAY_WIDTH, 32, TXT_JUSTIFIED);
-                drawJustifiedVal(cpat, 1, "m", DISPLAY_WIDTH, 48, TXT_JUSTIFIED);
+                if (bDangerous) {
+                    g_tft.setTextColor(bTargetPassingAhead ? TFT_ORANGE : TFT_RED);
+                }
+                drawJustifiedVal(cpad, 2, "nm", DISPLAY_WIDTH, 0, TR_DATUM);
+                drawJustifiedVal(cpab, 0, "~", DISPLAY_WIDTH, FONT_MEDIUM_ADJ_HEIGHT, TR_DATUM);
+                drawJustifiedVal(cpat, 1, "m", DISPLAY_WIDTH, FONT_MEDIUM_ADJ_HEIGHT * 2, TR_DATUM);
+                g_tft.setFreeFont(FONT_SMALL);
+                g_tft.drawString("CPA", DISPLAY_WIDTH, FONT_MEDIUM_ADJ_HEIGHT * 3);
             }
+
+            // Draw vessel name bottom-right
+            g_tft.setTextColor(TFT_GREEN);
+            g_tft.setFreeFont(FONT_SMALL);
+            g_tft.setTextDatum(BR_DATUM);
+            g_tft.drawString(target->getName(), DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
             // Draw selected vessel in white
             g_tft.fillCircle(x0 + round(p.getX()* range_scale),
                            y0 - round(p.getY()* range_scale),
-                           3, ST77XX_WHITE);
+                           3, TFT_WHITE);
             g_tft.drawLine(x0 + round(p.getX()* range_scale),
                          y0 - round(p.getY()* range_scale),
                          x0 + round(p.getX()* range_scale + v.getX()* vector_scale),
                          y0 - round(p.getY()* range_scale + v.getY()* vector_scale),
-                         ST77XX_YELLOW);
+                         TFT_YELLOW);
         }
     }
+
+
+    // Next page arrow center right
+    drawArrowRight(DISPLAY_WIDTH - 15, DISPLAY_HEIGHT / 2);
 }
 
 // Fetch the existing N2kAISTarget object for the specified MMSI, or allocate a
@@ -1369,15 +1395,14 @@ void setTarget(const N2kAISTarget* p) {
 }
 
 // Is the AIS target visible on the current AIS page?
-bool isVisibleTarget(const N2kAISTarget* t, Page pg) {
-    double range = pg == PAGE_AIS_12NM ? 12.0 : pg == PAGE_AIS_6NM ? 6.0 : 3.0;
+bool isVisibleTarget(const N2kAISTarget* t) {
 
     if (t->getTimestamp() == 0) {
         // Static data only (no position) so skip
         return false;
     }
     const N2kVector &p = t->getRelDistance();
-    if (p.getMagnitude() > range) {
+    if (p.getMagnitude() > g_aisRange) {
         return false;
     }
 
@@ -1397,63 +1422,107 @@ bool isDangerousTarget(double d, double t) {
 //
 // AIS subpage to display detailed vessel info.
 //
-// D0 to cycle selected vessel.
-// D1 to exit back to top level AIS page.
 void displaySubpageAisInfo() {
     char buffer[128];
+    int row = 0;
+    int rowSmall = 0;
 
     g_tft.setTextWrap(false);
-    g_tft.fillScreen(ST77XX_BLACK);
+    g_tft.setTextDatum(TL_DATUM);
+    g_tft.setFreeFont(FONT_MEDIUM);
+
+    g_tft.fillScreen(TFT_BLACK);
+
+#ifdef TESTING
+    // Draw touch rects
+    drawTouchRect(&g_subTitleRect);
+#endif
+
 
     if (g_bPosValid) {
         for (auto& t : g_targets) {
-            if (!isVisibleTarget(t.get(), g_page)) {
+            if (!isVisibleTarget(t.get())) {
                 continue;
             }
 
             if (t->getMmsi() == g_selTarget) {
                 static const int txtSize = 13;
-                g_tft.setTextColor(ST77XX_GREEN);
-                g_tft.setTextSize(2);
+                g_tft.setTextColor(TFT_GREEN);
 
-                g_tft.setCursor(0, 0);
-                g_tft.println(t->getName());
-                g_tft.print("MMSI ");
-                g_tft.println(t->getMmsi());
-                g_tft.println("");
+                g_tft.drawString(t->getName(), 0, FONT_MEDIUM_ADJ_HEIGHT * row);
+                row++;
 
-                const N2kVector& relPos = t->getRelDistance();
-                g_tft.print("Rng ");
-                g_tft.print(relPos.getMagnitude(), 2);
-                g_tft.print("nm ");
-                g_tft.print("Brg ");
-                g_tft.print(relPos.getBearing(), 0);
-                g_tft.println((char)0xf8);
+                buffer[0] = '\0';
+                snprintf(buffer, sizeof(buffer), "MMSI %u", t->getMmsi());
+                g_tft.drawString(buffer, 0, FONT_MEDIUM_ADJ_HEIGHT * row);
+                row += 2;
+
+                const N2kVector &relPos = t->getRelDistance();
+                buffer[0] = '\0';
+                snprintf(buffer, sizeof(buffer), "Range %.2f  Bearing %.0f~",
+                         relPos.getMagnitude(), relPos.getBearing());
+                g_tft.drawString(buffer, 0, FONT_MEDIUM_ADJ_HEIGHT * row);
+                row++;
 
                 const N2kVector& v = t->getVelocity();
-                g_tft.print("SOG ");
-                g_tft.print(v.getMagnitude(), 1);
-                g_tft.print("kts ");
-                g_tft.print("COG ");
-                g_tft.print(v.getBearing(), 0);
-                g_tft.println((char)0xf8);
 
-                g_tft.print("LOA ");
-                g_tft.print(t->getLength(), 1);
-                g_tft.print("ft ");
-                g_tft.print("Bm ");
-                g_tft.print(t->getBeam(), 1);
-                g_tft.println("ft ");
+                buffer[0] = '\0';
+                snprintf(buffer, sizeof(buffer), "SOG %.1fkts  COG %.0f~",
+                         v.getMagnitude(), v.getBearing());
+                g_tft.drawString(buffer, 0, FONT_MEDIUM_ADJ_HEIGHT * row);
+                row++;
 
-                g_tft.print("Dft ");
-                g_tft.print(t->getDraft(), 1);
-                g_tft.println("ft ");
+                buffer[0] = '\0';
+                snprintf(buffer, sizeof(buffer), "LOA %.1fft",
+                         t->getLength());
+                g_tft.drawString(buffer, 0, FONT_MEDIUM_ADJ_HEIGHT * row);
+                row++;
+
+                buffer[0] = '\0';
+                snprintf(buffer, sizeof(buffer), "Beam %.1fft  Draft %.1fft",
+                         t->getBeam(), t->getDraft());
+                g_tft.drawString(buffer, 0, FONT_MEDIUM_ADJ_HEIGHT * row);
+                row++;
+
+                if (t->getClass() == N2kAISTarget::CLASS_A) {
+                    g_tft.setFreeFont(FONT_SMALL);
+
+                    buffer[0] = '\0';
+                    snprintf(buffer, sizeof(buffer), "Type: %s",
+                             t->getVesselTypeStr());
+                    g_tft.drawString(buffer, 0, FONT_MEDIUM_ADJ_HEIGHT * row + 5 +
+                                     FONT_SMALL_ADJ_HEIGHT * rowSmall);
+                    rowSmall++;
+
+                    buffer[0] = '\0';
+                    snprintf(buffer, sizeof(buffer), "Dest: %s",
+                             t->getDest());
+                    g_tft.drawString(buffer, 0, FONT_MEDIUM_ADJ_HEIGHT * row + 5 +
+                                     FONT_SMALL_ADJ_HEIGHT * rowSmall);
+                    rowSmall++;
+
+                    buffer[0] = '\0';
+                    snprintf(buffer, sizeof(buffer), "Status: %s", t->getNavStatusStr());
+                    g_tft.drawString(buffer, 0, FONT_MEDIUM_ADJ_HEIGHT * row + 5 +
+                                     FONT_SMALL_ADJ_HEIGHT * rowSmall);
+                    rowSmall++;
+                }
 
                 break;
             }
         }
     }
 }
+
+#ifdef TESTING
+void drawTouchRect(const TouchRect* rect) {
+    int16_t x, y;
+    uint16_t w, h;
+
+    rect->getBoundingRect(&x, &y, &w, &h);
+    g_tft.drawRect(x, y, w, h, TFT_LIGHTGREY);
+}
+#endif
 
 
 // Redraw the display.
@@ -1471,37 +1540,34 @@ void displayUpdate(bool bForce) {
         switch (g_subpage) {
             case SUBPAGE_NONE:
                 switch (g_page) {
-                    case PAGE_POSITION:
-                        displayPagePosition();
-                        break;
-
                     case PAGE_WIND:
                         displayPageWind();
                         break;
 
-                    case PAGE_AIS_12NM:
-                    case PAGE_AIS_6NM:
-                    case PAGE_AIS_3NM:
-                    case PAGE_AIS_1NM:
-                        displayPageAis(g_page, now);
+                    case PAGE_POSITION:
+                        displayPagePosition();
+                        break;
+
+                    case PAGE_AIS:
+                        displayPageAis(now);
                         break;
                 }
                 break;
 
             case SUBPAGE_HIST_AWS:
-                displaySubpageHistory("AWS", &g_awsHistory, ST77XX_RED);
+                displaySubpageHistory("AWS", &g_awsHistory, TFT_RED);
                 break;
 
             case SUBPAGE_HIST_TWS:
-                displaySubpageHistory("TWS", &g_twsHistory, ST77XX_BLUE);
+                displaySubpageHistory("TWS", &g_twsHistory, TFT_BLUE);
                 break;
 
             case SUBPAGE_HIST_SOG:
-                displaySubpageHistory("SOG", &g_sogHistory, ST77XX_YELLOW);
+                displaySubpageHistory("SOG", &g_sogHistory, TFT_YELLOW);
                 break;
 
             case SUBPAGE_HIST_DEPTH:
-                displaySubpageHistory("Depth", &g_depthHistory, ST77XX_GREEN);
+                displaySubpageHistory("Depth", &g_depthHistory, TFT_GREEN);
                 break;
 
             case SUBPAGE_POS_LOG:
@@ -1634,12 +1700,19 @@ void handlePgn129038Msg(const tN2kMsg &N2kMsg) {
                                   aisCog, aisSog, aisHdg, aisRot, status)) {
         N2kAISTarget* target = getAISTarget(mmsi);
 
-        N2kPos p(latitude, longitude);
-        N2kVector v(metersPerSec2Kts(aisSog), rad2Deg(aisCog));
-        target->update(p, v);
+        N2kPos p;
+        N2kVector v;
 
-        if (g_bPosValid) {
-            target->calcCpa(g_localPos, g_localVelocity);
+        if (!N2kIsNA(aisSog) && !N2kIsNA(aisCog)) {
+            v.set(metersPerSec2Kts(aisSog), rad2Deg(aisCog));
+        }
+        if (!N2kIsNA(latitude) && !N2kIsNA(longitude)) {
+            p.set(latitude, longitude);
+            target->update(p, v, (N2kAISTarget::NavStatus)status);
+
+            if (g_bPosValid) {
+                target->calcCpa(g_localPos, g_localVelocity);
+            }
         }
     }
 }
@@ -1670,13 +1743,19 @@ void handlePgn129039Msg(const tN2kMsg &N2kMsg) {
                                   aisCog, aisSog, aisHdg,
                                   unit, display, dsc, band, msg22, mode, state)) {
         N2kAISTarget* target = getAISTarget(mmsi);
+        N2kPos p;
+        N2kVector v;
 
-        N2kPos p(latitude, longitude);
-        N2kVector v(metersPerSec2Kts(aisSog), rad2Deg(aisCog));
-        target->update(p, v);
+        if (!N2kIsNA(aisSog) && !N2kIsNA(aisCog)) {
+            v.set(metersPerSec2Kts(aisSog), rad2Deg(aisCog));
+        }
+        if (!N2kIsNA(latitude) && !N2kIsNA(longitude)) {
+            p.set(latitude, longitude);
+            target->update(p, v);
 
-        if (g_bPosValid) {
-            target->calcCpa(g_localPos, g_localVelocity);
+            if (g_bPosValid) {
+                target->calcCpa(g_localPos, g_localVelocity);
+            }
         }
     }
 }
