@@ -66,6 +66,8 @@ Navigation:
 ## Logbook History
 This page displays a snapshot of most of Logbook info on the hour for the last 4 hours. An initial snapshot is also taken when the system is first powered up once GPS position and time are acquired.
 
+<img width="789" height="594" alt="PXL_20260923_225536798" src="https://github.com/user-attachments/assets/ed402191-903a-4f73-a0d8-97c9e0be98ac" />
+
 Navigation:
 * Tap the time to cycle to a previous snapshot.
 * Tap anywhere else to return to the main Logbook info page.
