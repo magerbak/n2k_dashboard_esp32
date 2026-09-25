@@ -8,6 +8,15 @@
   Uses TFT_eSPI and TFT_eWidget GFX libraries with ILI9341 driver and
   FT6336 touch screen driver.
 
+  The TFT_eSPI library expects users to modify it to select a specific User_Setup.h
+  to specify the display driver and pin configuration. For the Hosyond module,
+  download the Hosyond Data Pack and copy the "Demo/Arduino/Install libraries"
+  into your Arduino/libraries directory (note: they will be overwritten if the
+  libraries are updated by the IDE).
+
+  We rely on using custom GFX fonts with '~' replaced by '°' so we can display
+  bearings without jumping through enormous hoops.
+
   Uses the NEMA2000 library for parsing N2K communications using the ESP32
   internal CAN controller (external transceiver required).
 
@@ -46,9 +55,10 @@
 #include "n2kaistarget.h"
 #include "touch_rect.h"
 
-#define VERSION_NUM      "v2.0.0"
-#define UPDATE_INTERVAL  1
-#define AIS_TIMEOUT      (3 * 60 + 10)
+#define VERSION_NUM     "v2.0.1"
+#define UPDATE_INTERVAL 1
+#define AIS_TIMEOUT     (3 * 60 + 10)
+#define WELCOME_MSG     "Hello Michael"
 
 // Default magnetic variation, in case this is not provided from the network.
 // Modify this value based on the region of operation.
@@ -74,7 +84,7 @@
 #define ARROW_HEIGHT    25
 #define ARROW_WIDTH     12
 
-#define NUM_LOG_ENTRIES 4
+#define NUM_LOGBOOK_ENTRIES 4
 
 // Display page
 enum Page {
@@ -96,25 +106,10 @@ enum Subpage {
     SUBPAGE_HIST_SEPARATOR,
 
     // Position subpages
-    SUBPAGE_POS_LOG,
+    SUBPAGE_POS_LOGBOOK,
 
     // AIS subpages
     SUBPAGE_AIS_INFO,
-};
-
-enum Event {
-    EVT_NONE,
-    EVT_D0_PRESS,
-    EVT_D0_RELEASE,
-    EVT_D1_PRESS,
-    EVT_D1_RELEASE,
-    EVT_D2_PRESS,
-    EVT_D2_RELEASE,
-};
-
-enum TextLayout {
-    TXT_JUSTIFIED,
-    TXT_CENTERED,
 };
 
 struct HistStatsContext {
@@ -129,12 +124,13 @@ struct HistStatsContext {
 };
 
 // Trip log
-struct LogData {
+struct TripLogData {
     uint32_t duration;
     float distance;
 };
 
-struct LogEntry {
+// On-the-hour logbook data
+struct LogbookEntry {
     bool bInUse;
 
     uint16_t timestamp;     // minutes since midnight
@@ -144,7 +140,7 @@ struct LogEntry {
     double heading;
     N2kVector velocity;
     N2kVector appWind;
-    LogData logData;
+    TripLogData logData;
     float atmPressure;
     float atmTemp;
     float seaTemp;
@@ -173,12 +169,10 @@ struct LogEntry {
 #define FONT_MEDIUM_ADJ_HEIGHT  (28 - 6)
 #define FONT_LARGE_ADJ_HEIGHT   (42 - 9)
 
-// Pin usage as follow:
-//             CS  DC/RS  RESET  SDI/MOSI  SCK  SDO/MISO  LED    VCC     GND
-// ESP32-S3:   10    2      15      11      12      13     21     5V     GND
+// LCD pin usage defined in User_Setup.h in TFT_eSPI library.
 TFT_eSPI g_tft;
 
-// Default orientation is portrait (240x320)
+// Touch sensor. Default orientation is portrait (240x320)
 FT6336 g_ts = FT6336(TOUCH_FT6336_SDA, TOUCH_FT6336_SCL, TOUCH_FT6336_INT,
                      TOUCH_FT6336_RST, DISPLAY_HEIGHT, DISPLAY_WIDTH);
 
@@ -213,7 +207,6 @@ TouchRect g_subBodyRect;
 
 float g_envAtmPressure = std::numeric_limits<float>::quiet_NaN();
 float g_envAtmTemp = std::numeric_limits<float>::quiet_NaN();
-float g_envAtmHumidity = std::numeric_limits<float>::quiet_NaN();
 float g_envSeaTemp = std::numeric_limits<float>::quiet_NaN();;
 
 #ifdef USE_METRIC_PRESSURE
@@ -231,26 +224,28 @@ static const char g_unitsTemp[] = "F";
 static const char g_unitsDepth[] = "ft";
 #endif
 
-// Log data
+// TripLog state
 Preferences g_prefs;
-LogData g_tripLog;          // Duration and distance of current trip
+TripLogData g_tripLog;          // Duration and distance of current trip
 bool g_tripResetConfirmation = false;
 N2kPos g_lastPos;           // Lat/Long of last log sample
 
-LogEntry g_logEntries[NUM_LOG_ENTRIES];
-unsigned int g_logEntryIndex;   // Index of next entry to store.
-unsigned int g_selLogEntry; // Reverse index of displayed entry
+// Logbook state
+LogbookEntry g_logbookEntries[NUM_LOGBOOK_ENTRIES];
+unsigned int g_logbookEntryIndex;   // Index of next entry to store.
+unsigned int g_selLogbookEntry; // Reverse index of displayed entry
 
+// Time
 uint16_t g_date;            // Days since 1/1/1970
 double g_secsSinceMidnight; // Seconds since midnight
 int16_t g_tzOffset;         // Timezone offset in minutes, if known
 
+// Boat navigation state
 bool g_bPosValid = false;
 N2kPos g_localPos;          // Latitude and Longitude
 N2kVector g_localVelocity;  // Boat COG (in degrees) and SOG (kts) as a vector
 double g_hdg = 0.0;         // degrees
 double g_variation = DEFAULT_MAGNETIC_VARIATION; // radians
-
 double g_depth = 0.0;       // ft
 N2kVector g_appWind;        // Degrees, knots
 N2kVector g_trueWind;       // Degrees, knots
@@ -262,13 +257,13 @@ uint32_t g_selTarget = 0;   // MMSI of selected AIS target
 // 1s timer for refreshing data model (ageing out AIS targets, sampling data history).
 SimpleTimer g_updateTimer;
 
-// 60s timer for recording aggregate min/max history and log data.
+// 60s timer for recording aggregate min/max history and trip log data.
 SimpleTimer g_historyTimer;
 
 // 10min timer to save trip log data
 SimpleTimer g_tripLogTimer;
 
-// Timer for recording on-the-hour log entries
+// Timer for recording on-the-hour logbook entries
 SimpleTimer g_hourTimer;
 
 MinMaxDataHistory<double> g_awsHistory;
@@ -297,7 +292,7 @@ void setup(void) {
 
   g_updateTimer.begin(nullptr, HISTORY_SAMPLE_INTERVAL_MS, updateCallback);
   g_historyTimer.begin(nullptr, HISTORY_AGGREGATION_INTERVAL_MS, historyCallback);
-  g_tripLogTimer.begin(nullptr, LOG_SAVE_INTERVAL_MS, logCallback);
+  g_tripLogTimer.begin(nullptr, LOG_SAVE_INTERVAL_MS, tripLogCallback);
 
   // Record history of AWS, TWS and SOG for last 60mins.
   g_awsHistory.begin(60);
@@ -342,6 +337,8 @@ void loop() {
 }
 
 void setupTouchRects() {
+    // Note: define TESTING in n2k_config.h to draw a bounding box around each
+    // touch rect.
     g_nextPageRect.init(DISPLAY_WIDTH - ARROW_WIDTH - 30, DISPLAY_HEIGHT / 2 - ARROW_HEIGHT / 2 - 10,
                         ARROW_WIDTH + 15 + 15, ARROW_HEIGHT + 10 * 2);
     g_nextPageRect.setReleaseCallback(handleNextPageCallback, nullptr);
@@ -396,9 +393,10 @@ void handleTouchEvents() {
     }
 
     if (g_subpage == SUBPAGE_NONE) {
-        // All top level pages have a next page button
+        // All top level pages have a next page icon
         g_nextPageRect.update(bPressed, x, y);
 
+        // Update active areas based on the current page.
         switch (g_page) {
             case PAGE_WIND:
                 g_awsRect.update(bPressed, x, y);
@@ -463,8 +461,8 @@ void handleSogCallback(void* user) {
 }
 
 void handleTimeCallback(void* user) {
-    g_selLogEntry = 0;
-    g_subpage = SUBPAGE_POS_LOG;
+    g_selLogbookEntry = 0;
+    g_subpage = SUBPAGE_POS_LOGBOOK;
     g_tripResetConfirmation = false;
 
     displayUpdate(true);
@@ -526,13 +524,13 @@ void handleSubTitleCallback(void* user) {
             }
             break;
 
-        case SUBPAGE_POS_LOG:
+        case SUBPAGE_POS_LOGBOOK:
             {
-                unsigned int ix = (g_selLogEntry + 1) % NUM_LOG_ENTRIES;
-                if (g_logEntries[ix].bInUse == false) {
+                unsigned int ix = (g_selLogbookEntry + 1) % NUM_LOGBOOK_ENTRIES;
+                if (g_logbookEntries[ix].bInUse == false) {
                     ix = 0;
                 }
-                g_selLogEntry = ix;
+                g_selLogbookEntry = ix;
             }
             break;
 
@@ -634,7 +632,7 @@ bool historyCallback(void* user) {
     return true;
 }
 
-bool logCallback(void* user) {
+bool tripLogCallback(void* user) {
     // Persist the accumulated log data
     g_prefs.putUInt("tripLogTime", g_tripLog.duration);
     g_prefs.putFloat("tripLogDist", g_tripLog.distance);
@@ -643,9 +641,9 @@ bool logCallback(void* user) {
     return true;
 }
 
-bool logEntryCallback(void* user) {
+bool logbookEntryCallback(void* user) {
     // Snapshot logbook entry data on the hour
-    addLogEntry();
+    addLogbookEntry();
 
     // Make sure next interval is 1hr because the first time it is not.
     SimpleTimer* t = (SimpleTimer*)user;
@@ -671,13 +669,13 @@ void displaySplashScreen() {
     g_tft.setTextColor(TFT_GREEN, TFT_BLACK);
 
     g_tft.setTextDatum(MC_DATUM);
-    g_tft.drawString("Hello Michael", DISPLAY_WIDTH / 2, DISPLAY_HEIGHT / 2, GFXFF);
+    g_tft.drawString(WELCOME_MSG, DISPLAY_WIDTH / 2, DISPLAY_HEIGHT / 2, GFXFF);
 
     g_tft.setTextDatum(TL_DATUM);
 }
 
-// Helper function to print a floating point value using a calculated starting
-// position based on its displayed length and a layout option.
+// Helper function to print a floating point value with units using a calculated
+// starting position based on its displayed length and a layout option.
 void drawJustifiedVal(double val, int precision, const char* suffix, int x, int y, int datum) {
     char str[64];
 
@@ -722,7 +720,7 @@ void displayPageWind() {
     // AWS history top left
     graph1.createGraph(60, 30, TFT_BLACK);
 
-    // x scale units is from 60mins to 0, y scale unit is 0 to max val
+    // x scale units is from 0 to 60mins, y scale unit is 0 to 30kts
     graph1.setGraphScale(0.0, 60.0, 0.0, 30.0);
     graph1.setGraphGrid(0.0, 10.0, 0.0, 10.0, TFT_RED);
 
@@ -732,7 +730,7 @@ void displayPageWind() {
     // TWS history bottom left
     graph2.createGraph(60, 30, TFT_BLACK);
 
-    // x scale units is from -60mins to 0, y scale unit is 0 to max val
+    // x scale units is from 0 to 60mins, y scale unit is 0 to 30kts
     graph2.setGraphScale(0.0, 60.0, 0.0, 30.0);
     graph2.setGraphGrid(0.0, 10.0, 0.0, 10.0, TFT_BLUE);
 
@@ -752,6 +750,7 @@ void displayPageWind() {
     g_tft.drawCircleHelper(x0, y0, radius - 1, 0x4, TFT_GREEN);
     g_tft.endWrite();
 
+    // Draw index every 10 and 30 degrees.
     for (int d = 0; d < 360; d += 10) {
         drawRadial(x0,  y0,  radius - 2,  d,  2,  TFT_WHITE);
     }
@@ -759,6 +758,7 @@ void displayPageWind() {
         drawRadial(x0,  y0,  radius - 2,  d,  6,  TFT_WHITE);
     }
 
+    // Draw apparent wind indicator
     drawRadial(x0, y0, radius - 10, g_appWind.getBearing(), radius / 2 - 10, TFT_WHITE);
 
     // Apparent wind speed and angle at top
@@ -929,13 +929,11 @@ void displayPagePosition() {
 
     // Annoyingly, GFXFF fonts use the font baseline instead of top-left as the
     // cursor position. In addition the GNU FreeFonts used by GFXFF have a
-    // significant line gap, which makes lines of text feel drafty and is less
+    // significant line gap, which makes lines of text feel drafty and less
     // compact. So for all these reasons, we abandon the use of setCursor and
     // println(), and instead manually keep track of our text rows and use a modified
     // font height.
 
-    // We rely on using custom GFX fonts with '~' replaced by '°' so we can display bearings
-    // without jumping through enormous hoops.
     g_tft.setTextDatum(TL_DATUM);
     g_tft.setTextWrap(false);
     g_tft.setFreeFont(FONT_MEDIUM);
@@ -961,7 +959,7 @@ void displayPagePosition() {
     g_tft.drawString(buffer, 0, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
     row += 2;
 
-    // Atmospheric data in top-right
+    // Atmospheric data below time on the right
     g_tft.setTextDatum(TR_DATUM);
 
     // Temp
@@ -986,19 +984,10 @@ void displayPagePosition() {
     }
     row++;
 
-    // Humidity
-    if (!std::isnan(g_envAtmHumidity)) {
-        buffer[0] = '\0';
-        snprintf(buffer, sizeof(buffer), "%.0f%%", g_envAtmHumidity);
-        g_tft.drawString(buffer, DISPLAY_WIDTH, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
-    }
-
     // Position below time on the left
     g_tft.setTextDatum(TL_DATUM);
-    row = 2;
-
-    // Position in cyan
     g_tft.setTextColor(TFT_CYAN);
+    row = 2;
 
     // GPS Position
     if (g_bPosValid) {
@@ -1011,10 +1000,10 @@ void displayPagePosition() {
     }
     row += 2;
 
-    // Add another small gap for improved readability
+    // Add a small gap for improved readability
     offset += 5;
 
-    // Trip data
+    // Trip distance and time
     buffer[0] = '\0';
     if (g_tripResetConfirmation) {
         snprintf(buffer, sizeof(buffer), "Press again to RESET");
@@ -1027,8 +1016,8 @@ void displayPagePosition() {
     g_tft.drawString(buffer, 0, row * FONT_MEDIUM_ADJ_HEIGHT + offset);
     row++;
 
-    g_tft.setTextColor(TFT_YELLOW);
     // Heading and course
+    g_tft.setTextColor(TFT_YELLOW);
     buffer[0] = '\0';
     snprintf(buffer, sizeof(buffer), "HDG %.0f~    COG %.0f~",
              g_hdg, g_localVelocity.getBearing());
@@ -1071,17 +1060,17 @@ void displayPagePosition() {
 }
 
 //
-// Log entry subpage.
+// Logbook entry subpage.
 //
 // Displays saved on-the-hour logbook data.
 //
-void displaySubpageLog() {
+void displaySubpageLogbook() {
     char buffer[128];
     int row = 0;
     int offset = 0;
     char atmTemp[4] = "-";
     char seaTemp[4] = "-";
-    const LogEntry* ent;
+    const LogbookEntry* ent;
 
     g_tft.setTextDatum(TL_DATUM);
     g_tft.setTextWrap(false);
@@ -1095,7 +1084,7 @@ void displaySubpageLog() {
 #endif
 
     g_tft.setTextColor(TFT_YELLOW);
-    ent = getLogEntry(g_selLogEntry);
+    ent = getLogbookEntry(g_selLogbookEntry);
 
     if (ent) {
         if (ent->tzOffset) {
@@ -1201,35 +1190,35 @@ N2kVector calcTrueWind(const N2kVector* appWind, double speed, double hdg)
 }
 
 // Snapshots a new on-the-hour log entry.
-bool addLogEntry()
+bool addLogbookEntry()
 {
     unsigned int timestamp = (unsigned int)g_secsSinceMidnight / 60;
 
-    memset(&g_logEntries[g_logEntryIndex], 0, sizeof(struct LogEntry));
+    memset(&g_logbookEntries[g_logbookEntryIndex], 0, sizeof(struct LogbookEntry));
 
-    g_logEntries[g_logEntryIndex].bInUse = true;
+    g_logbookEntries[g_logbookEntryIndex].bInUse = true;
 
-    g_logEntries[g_logEntryIndex].timestamp = timestamp; // Minutes since midnight
-    g_logEntries[g_logEntryIndex].tzOffset = g_tzOffset; // Timezone offset in minutes
-    g_logEntries[g_logEntryIndex].position = g_localPos;
-    g_logEntries[g_logEntryIndex].heading = g_hdg;
-    g_logEntries[g_logEntryIndex].velocity = g_localVelocity;
-    g_logEntries[g_logEntryIndex].appWind = g_appWind;
-    g_logEntries[g_logEntryIndex].logData = g_tripLog;
-    g_logEntries[g_logEntryIndex].atmPressure = g_envAtmPressure;
-    g_logEntries[g_logEntryIndex].atmTemp = g_envAtmTemp;
-    g_logEntries[g_logEntryIndex].seaTemp = g_envSeaTemp;
+    g_logbookEntries[g_logbookEntryIndex].timestamp = timestamp; // Minutes since midnight
+    g_logbookEntries[g_logbookEntryIndex].tzOffset = g_tzOffset; // Timezone offset in minutes
+    g_logbookEntries[g_logbookEntryIndex].position = g_localPos;
+    g_logbookEntries[g_logbookEntryIndex].heading = g_hdg;
+    g_logbookEntries[g_logbookEntryIndex].velocity = g_localVelocity;
+    g_logbookEntries[g_logbookEntryIndex].appWind = g_appWind;
+    g_logbookEntries[g_logbookEntryIndex].logData = g_tripLog;
+    g_logbookEntries[g_logbookEntryIndex].atmPressure = g_envAtmPressure;
+    g_logbookEntries[g_logbookEntryIndex].atmTemp = g_envAtmTemp;
+    g_logbookEntries[g_logbookEntryIndex].seaTemp = g_envSeaTemp;
 
-    g_logEntryIndex = (g_logEntryIndex + 1) % NUM_LOG_ENTRIES;
+    g_logbookEntryIndex = (g_logbookEntryIndex + 1) % NUM_LOGBOOK_ENTRIES;
 
     return true;
 }
 
 // Returns pointer to nth log entry in the past (0 represents the most recent).
-const LogEntry* getLogEntry(unsigned int n) {
-    unsigned int ix = (g_logEntryIndex + NUM_LOG_ENTRIES - (n + 1)) % NUM_LOG_ENTRIES;
-    if (g_logEntries[ix].bInUse) {
-        return &g_logEntries[ix];
+const LogbookEntry* getLogbookEntry(unsigned int n) {
+    unsigned int ix = (g_logbookEntryIndex + NUM_LOGBOOK_ENTRIES - (n + 1)) % NUM_LOGBOOK_ENTRIES;
+    if (g_logbookEntries[ix].bInUse) {
+        return &g_logbookEntries[ix];
     }
     return nullptr;
 }
@@ -1254,7 +1243,7 @@ void displayPageAis(time_t now) {
     int y0 = DISPLAY_HEIGHT / 2;
 
     double range_scale = radius / g_aisRange;
-    double vector_scale = range_scale / 12.0;;
+    double vector_scale = range_scale / 12.0;       // 5min = 1hr / 12
 
     g_tft.setTextWrap(false);
     g_tft.setFreeFont(FONT_LARGE);
@@ -1567,11 +1556,11 @@ void displayUpdate(bool bForce) {
                 break;
 
             case SUBPAGE_HIST_DEPTH:
-                displaySubpageHistory("Depth", &g_depthHistory, TFT_GREEN);
+                displaySubpageHistory("Dep", &g_depthHistory, TFT_GREEN);
                 break;
 
-            case SUBPAGE_POS_LOG:
-                displaySubpageLog();
+            case SUBPAGE_POS_LOGBOOK:
+                displaySubpageLogbook();
                 break;
 
             case SUBPAGE_AIS_INFO:
@@ -1621,7 +1610,7 @@ void handlePgn129025Msg(const tN2kMsg &N2kMsg) {
                 // If we already have the time then take an initial log history snapshot
                 // once we have a position.
                 if (g_hourTimer.isEnabled()) {
-                    addLogEntry();
+                    addLogbookEntry();
                 }
             }
         }
@@ -1667,12 +1656,12 @@ void handlePgn129033Msg(const tN2kMsg &N2kMsg) {
             if (!g_hourTimer.isEnabled()) {
                 int hrs = (int)trunc(secsSinceMidnight / 3600) + 1;
                 int remaining = 3600 * hrs - (int)trunc(secsSinceMidnight) + 30;
-                g_hourTimer.begin(&g_hourTimer, remaining * 1000, logEntryCallback);
+                g_hourTimer.begin(&g_hourTimer, remaining * 1000, logbookEntryCallback);
 
                 // If we already have GPS position and we just got time, then take
                 // an initial log history snapshot.
                 if (g_bPosValid) {
-                    addLogEntry();
+                    addLogbookEntry();
                 }
             }
         }
