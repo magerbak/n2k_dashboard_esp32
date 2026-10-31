@@ -54,8 +54,11 @@
 #include "n2kunits.h"
 #include "n2kaistarget.h"
 #include "touch_rect.h"
+#ifdef SCREEN_CAPTURE
+#include "tft_server.h"
+#endif
 
-#define VERSION_NUM     "v2.0.1"
+#define VERSION_NUM     "v2.1.0"
 #define UPDATE_INTERVAL 1
 #define AIS_TIMEOUT     (3 * 60 + 10)
 #define WELCOME_MSG     "Hello Michael"
@@ -171,6 +174,9 @@ struct LogbookEntry {
 
 // LCD pin usage defined in User_Setup.h in TFT_eSPI library.
 TFT_eSPI g_tft;
+#ifdef SCREEN_CAPTURE
+TFTServer g_tftServer(&g_tft);
+#endif
 
 // Touch sensor. Default orientation is portrait (240x320)
 FT6336 g_ts = FT6336(TOUCH_FT6336_SDA, TOUCH_FT6336_SCL, TOUCH_FT6336_INT,
@@ -275,7 +281,7 @@ MinMaxDataHistory<double> g_depthHistory;
 time_t g_lastUpdate = 0;
 
 void setup(void) {
-  Serial.begin(115200);
+  Serial.begin(BAUDRATE);
   delay(2000);
   Serial.println(F("Starting N2K dashboard"));
 
@@ -334,6 +340,11 @@ void loop() {
 
     // Handle incoming N2K messages.
     g_NMEA2000.ParseMessages();
+
+#ifdef SCREEN_CAPTURE
+    g_tftServer.run();
+#endif
+
 }
 
 void setupTouchRects() {
