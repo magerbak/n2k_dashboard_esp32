@@ -19,7 +19,7 @@ All headings and courses are relative to true North and speeds are in knots. Dis
 # Wind Info
 Displays basic wind and other instrument data.
 
-<img width="673" height="516" alt="PXL_20260921_183202571" src="https://github.com/user-attachments/assets/e4720aac-e498-49a1-a851-30fe11d99b9f" />
+<img width="320" height="240" alt="wind0" src="https://github.com/user-attachments/assets/f96d91a6-2a20-41db-a9b0-d6ed74407332" />
 
 * The radial dial shows the apparent wind angle (AWA)
 * Boat speed (SOG) and course (COG) are in the center in yellow.
@@ -33,7 +33,7 @@ Navigation:
 
 ## History Detail
 
-<img width="851" height="657" alt="PXL_20260921_183219417" src="https://github.com/user-attachments/assets/a46311f5-0dd8-4a2c-9838-217b3d328a52" />
+<img width="320" height="240" alt="aws0" src="https://github.com/user-attachments/assets/83b83bc0-791c-48b2-a7a6-4b3396c406cb" />
 
 The history detail page shows a 60 minute history of TWS, AWS, SOG or Depth with a bar showing the range of values occurring during each minute. The maximum, minimum and average values over the last 60 minutes are also shown. The vertical axis is divided every 10 units.
 
@@ -44,7 +44,7 @@ Navigation:
 # Logbook Info
 This page is intended to provide information for making logbook entries or radio calls.
 
-<img width="1081" height="806" alt="PXL_20260921_183233307" src="https://github.com/user-attachments/assets/a58d3177-4ab3-491a-a5fc-21170d32b373" />
+<img width="320" height="240" alt="pos0" src="https://github.com/user-attachments/assets/3d12e052-c557-4259-af12-19c06c6c3a18" />
 
 Includes:
 * Current time (UTC or Local)
@@ -66,7 +66,7 @@ Navigation:
 ## Logbook History
 This page displays a snapshot of most of Logbook info on the hour for the last 4 hours. An initial snapshot is also taken when the system is first powered up once GPS position and time are acquired.
 
-<img width="789" height="594" alt="PXL_20260923_225536798" src="https://github.com/user-attachments/assets/ed402191-903a-4f73-a0d8-97c9e0be98ac" />
+<img width="320" height="240" alt="pos_log0" src="https://github.com/user-attachments/assets/8917b3d0-bb54-4f38-a537-77df33699a61" />
 
 Navigation:
 * Tap the time to cycle to a previous snapshot.
@@ -75,9 +75,10 @@ Navigation:
 # AIS Info
 Displays a North-up graphical representation of AIS targets within the selected range.
 
-<img width="1089" height="817" alt="PXL_20260921_183256133" src="https://github.com/user-attachments/assets/8e88fc0d-b06d-41b2-97d9-b39a99c38f97" />
+<img width="320" height="240" alt="ais1" src="https://github.com/user-attachments/assets/32c7b091-601f-4f5d-b353-251a3cc7652f" />
 
 * Speed vectors in yellow show projected position in 5 minutes.
+* Your vessel is shown at center in yellow. Selected target is shown in white. Other vessels default to green.
 * Targets shown in red are considered potential collision issues (closest point of approach is < 1nm within the next hour).
 * Selected vessel's range, true bearing and distance are displayed in green at bottom left.
 * Selected vessel's MMSI/name is displayed in green at bottom right.
@@ -95,7 +96,7 @@ Navigation:
 ## AIS Vessel Info
 The additional vessel info subpage includes additional static data for the selected vessel such and length, beam and draft, vessel type, status and destination when provided.
 
-<img width="1101" height="839" alt="PXL_20260921_183305165 MP" src="https://github.com/user-attachments/assets/39b53d1f-599c-4fca-8f9c-282ebe404087" />
+<img width="320" height="240" alt="ais_detail0" src="https://github.com/user-attachments/assets/40f0d3cb-28a2-47e2-a0d1-1b6b91ea4c58" />
 
 Navigation:
 * Tap the vessel name to cycle between target.
