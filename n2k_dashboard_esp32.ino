@@ -175,7 +175,8 @@ struct LogbookEntry {
 // LCD pin usage defined in User_Setup.h in TFT_eSPI library.
 TFT_eSPI g_tft;
 #ifdef SCREEN_CAPTURE
-TFTServer g_tftServer(&g_tft);
+uint8_t g_captureBuf[DISPLAY_WIDTH * DISPLAY_HEIGHT * 3];
+TFTServer g_tftServer(&g_tft, g_captureBuf, sizeof(g_captureBuf));
 #endif
 
 // Touch sensor. Default orientation is portrait (240x320)

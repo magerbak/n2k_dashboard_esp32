@@ -6,7 +6,7 @@ class TFT_eSPI;
 class TFTServer
 {
 public:
-    TFTServer(TFT_eSPI* tft);
+    TFTServer(TFT_eSPI* tft, uint8_t* buf, size_t bufLen);
     ~TFTServer();
 
     bool run();
@@ -29,7 +29,7 @@ private:
     uint32_t m_delay = 0;
 
     TFT_eSPI* m_tft = nullptr;
-
     uint8_t* m_data = nullptr;
+    size_t m_maxlen = 0;
     int m_offset = 0;
 };

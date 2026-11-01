@@ -2,8 +2,8 @@
 #include <TFT_eSPI.h>
 #include "tft_server.h"
 
-TFTServer::TFTServer(TFT_eSPI* tft) :
-    m_tft(tft), m_state(STATE_INIT)
+TFTServer::TFTServer(TFT_eSPI* tft, uint8_t* data, size_t maxlen) :
+    m_tft(tft), m_data(data), m_maxlen(maxlen)
 {
 }
 
@@ -90,7 +90,6 @@ bool TFTServer::run()
 
         int n = m_tft->width() * m_tft->height() * 3 - m_offset;
         if (n == 0) {
-            delete [] m_data;
             m_offset = 0;
             m_start = 0;
             m_delay = 0;
@@ -111,16 +110,14 @@ bool TFTServer::run()
 
 bool TFTServer::screenshot()
 {
-    if (m_data == nullptr) {
-        m_data = new uint8_t[m_tft->width() * m_tft->height() * 3];
+    if (m_data == nullptr || m_tft->width() * m_tft->height() * 3 > m_maxlen) {
+        return false;
     }
     m_offset = 0;
 
-    if (m_data) {
-        m_tft->readRectRGB(0, 0, m_tft->width(), m_tft->height(), m_data);
-    }
+    m_tft->readRectRGB(0, 0, m_tft->width(), m_tft->height(), m_data);
 
-    return m_data != nullptr;
+    return true;
 }
 
 void TFTServer::sendHeader()
