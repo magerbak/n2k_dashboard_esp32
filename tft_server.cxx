@@ -9,7 +9,6 @@ TFTServer::TFTServer(TFT_eSPI* tft, uint8_t* data, size_t maxlen) :
 
 TFTServer::~TFTServer()
 {
-    delete [] m_data;
 }
 
 bool TFTServer::run()
