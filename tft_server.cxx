@@ -18,19 +18,16 @@ bool TFTServer::run()
 
     switch (m_state) {
     case STATE_INIT:
-        m_start = millis();
-        m_delay = 50;
+        setTimeout(50);
         m_state = STATE_FLUSH;
         break;
     case STATE_FLUSH:
-        if (millis() - m_start < m_delay) {
+        if (!checkTimeout()) {
             if (Serial.available()) {
                cmd = Serial.read();
             }
         }
         else {
-            m_start = millis();
-            m_delay = 50;
             m_state = STATE_READY;
         }
         break;
@@ -39,16 +36,19 @@ bool TFTServer::run()
             cmd = Serial.read();
 
             switch (cmd) {
-            case 'E':
-                // Echo
+            case 'H':
+                // Hello. For testing.
                 Serial.println("Hello");
                 Serial.flush();
                 break;
             case 'S':
                 if (screenshot()) {
-                    m_start = millis();
-                    m_delay = 50;
+                    setTimeout(50);
                     m_state = STATE_HDR;
+                }
+                else {
+                    Serial.write('X');
+                    Serial.flush();
                 }
                 break;
             default:
@@ -59,22 +59,22 @@ bool TFTServer::run()
         }
         break;
     case STATE_HDR:
-        if (millis() - m_start < m_delay) {
+        if (!checkTimeout()) {
             break;
         }
         sendHeader();
 
-        m_start = millis();
-        m_delay = IMAGE_XFER_PERIOD_MS;
+        setTimeout(IMAGE_XFER_PERIOD_MS);
         m_state = STATE_IMG;
         break;
     case STATE_IMG:
-        if (millis() - m_start < m_delay) {
+        if (!checkTimeout()) {
             if (Serial.available()) {
                 cmd = Serial.read();
 
                 switch (cmd) {
                 case 'X':
+                    setTimeout(50);
                     m_state = STATE_FLUSH;
                     break;
                 default:
@@ -84,14 +84,13 @@ bool TFTServer::run()
             }
             break;
         }
-        m_start = millis();
-        m_delay = IMAGE_XFER_PERIOD_MS;
+        setTimeout(IMAGE_XFER_PERIOD_MS);
 
         int n = m_tft->width() * m_tft->height() * 3 - m_offset;
         if (n == 0) {
+            // Complete
+            setTimeout(0);
             m_offset = 0;
-            m_start = 0;
-            m_delay = 0;
             m_state = STATE_READY;
             break;
         }
@@ -100,11 +99,22 @@ bool TFTServer::run()
             n = IMAGE_XFER_BYTES;
         }
         Serial.write(&m_data[m_offset], n);
-        m_offset += n;
         Serial.flush();
+        m_offset += n;
         break;
     }
     return true;
+}
+
+void TFTServer::setTimeout(uint32_t timeout)
+{
+    m_start = millis();
+    m_timeout = timeout;
+}
+
+bool TFTServer::checkTimeout() const
+{
+    return (millis() - m_start >= m_timeout);
 }
 
 bool TFTServer::screenshot()
